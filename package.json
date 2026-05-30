@@ -1,0 +1,20 @@
+{
+  "name": "company-brain",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.20.0",
+  "scripts": {
+    "cb": "pnpm --filter @company-brain/cli dev",
+    "mcp": "pnpm --filter @company-brain/mcp dev",
+    "dev": "pnpm --parallel --filter @company-brain/server --filter @company-brain/web dev",
+    "dev:server": "pnpm --filter @company-brain/server dev",
+    "dev:web": "pnpm --filter @company-brain/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm --filter @company-brain/server exec tsx --test --test-concurrency=1 ../../packages/pages/src/index.test.ts ../../packages/memory/src/index.test.ts",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  }
+}

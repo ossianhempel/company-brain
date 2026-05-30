@@ -1,0 +1,19 @@
+{
+  "name": "@company-brain/cli",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "COMPANY_BRAIN_DATA_DIR=../../data/pgdata tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@company-brain/db": "workspace:*",
+    "@company-brain/memory": "workspace:*",
+    "@company-brain/pages": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

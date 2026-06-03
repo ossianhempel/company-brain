@@ -1,5 +1,7 @@
 # Agents Working On Company Brain
 
+Read VISION.md to understand what we're trying to build and where we're headed.
+
 ## Planning Memory
 
 The living project plan and scratchpad lives in Obsidian:

@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool, type PoolClient } from "pg";
 
@@ -30,10 +30,129 @@ export async function createDb(options: string | CreateDbOptions = defaultDataDi
 
   const dataDir = typeof options === "string" ? options : options.dataDir ?? defaultDataDir;
   await mkdir(dirname(dataDir), { recursive: true });
+  const releaseLock = await acquirePgliteStoreLock(dataDir);
+  await clearStalePgliteRuntimeFiles(dataDir);
   const db = new PGlite(dataDir) as unknown as CompanyBrainDb;
+  const close = db.close.bind(db);
+  db.close = async () => {
+    try {
+      await close();
+      await markPgliteCleanClose(dataDir);
+    } finally {
+      await releaseLock();
+    }
+  };
 
-  await migrateDb(db);
-  return db;
+  try {
+    await migrateDb(db);
+    return db;
+  } catch (error) {
+    await releaseLock();
+    throw error;
+  }
+}
+
+async function clearStalePgliteRuntimeFiles(dataDir: string) {
+  const runtimeFiles = ["postmaster.pid", ".s.PGSQL.5432.lock.out"];
+  const cleanClosePath = `${dataDir}.company-brain-clean-close`;
+  const cleanClose = await fileStat(cleanClosePath);
+
+  for (const fileName of runtimeFiles) {
+    const path = join(dataDir, fileName);
+    const runtimeFile = await fileStat(path);
+    if (!runtimeFile) {
+      continue;
+    }
+
+    if (!cleanClose || cleanClose.mtimeMs < runtimeFile.mtimeMs) {
+      throw new Error(`PGlite runtime file exists without a clean Company Brain shutdown marker: ${path}`);
+    }
+
+    await rename(path, `${path}.stale-${Date.now()}`);
+  }
+}
+
+async function markPgliteCleanClose(dataDir: string) {
+  await writeFile(`${dataDir}.company-brain-clean-close`, new Date().toISOString());
+}
+
+async function fileStat(path: string) {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function acquirePgliteStoreLock(dataDir: string) {
+  const lockDir = `${dataDir}.company-brain.lock`;
+  const metadataPath = join(lockDir, "owner.json");
+
+  async function writeOwner() {
+    await writeFile(
+      metadataPath,
+      JSON.stringify({
+        pid: process.pid,
+        createdAt: new Date().toISOString()
+      })
+    );
+  }
+
+  try {
+    await mkdir(lockDir);
+    await writeOwner();
+    return async () => {
+      await rm(lockDir, { recursive: true, force: true });
+    };
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "EEXIST") {
+      throw error;
+    }
+  }
+
+  const owner = await readLockOwner(metadataPath);
+  if (!owner) {
+    const lockStats = await stat(lockDir);
+    if (Date.now() - lockStats.mtimeMs < 30_000) {
+      throw new Error(`PGlite store lock is being acquired by another process: ${dataDir}`);
+    }
+  }
+
+  if (owner?.pid && isProcessRunning(owner.pid)) {
+    throw new Error(`PGlite store is already in use by process ${owner.pid}: ${dataDir}`);
+  }
+
+  await rename(lockDir, `${lockDir}.stale-${Date.now()}`);
+  await mkdir(lockDir);
+  await writeOwner();
+  return async () => {
+    await rm(lockDir, { recursive: true, force: true });
+  };
+}
+
+async function readLockOwner(path: string) {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as { pid?: number };
+  } catch {
+    return null;
+  }
+}
+
+function isProcessRunning(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 async function createPostgresDb(databaseUrl: string): Promise<CompanyBrainDb> {
@@ -266,6 +385,84 @@ async function migrateDb(db: CompanyBrainDb) {
     where child.parent_page_id is null
       and parent.slug = 'projects'
       and child.slug like 'projects/%';
+  `);
+
+  await applyMigration(db, 7, `
+    alter table pages add column if not exists visibility text not null default 'workspace';
+    alter table pages add column if not exists owner text not null default 'system';
+    alter table pages add column if not exists permission_note text;
+    create index if not exists pages_visibility_idx on pages (visibility);
+
+    create table if not exists page_comments (
+      id text primary key,
+      page_id text not null references pages(id) on delete cascade,
+      body text not null,
+      anchor_text text,
+      created_by text not null default 'system',
+      created_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+
+    create index if not exists page_comments_page_id_created_at_idx on page_comments (page_id, created_at desc);
+    create index if not exists page_comments_deleted_at_idx on page_comments (deleted_at);
+
+    create table if not exists page_share_links (
+      id text primary key,
+      page_id text not null references pages(id) on delete cascade,
+      token text not null unique,
+      label text not null default 'Share link',
+      access_level text not null default 'view',
+      password text,
+      expires_at timestamptz,
+      created_by text not null default 'system',
+      created_at timestamptz not null default now(),
+      revoked_at timestamptz
+    );
+
+    create index if not exists page_share_links_page_id_created_at_idx on page_share_links (page_id, created_at desc);
+    create index if not exists page_share_links_revoked_at_idx on page_share_links (revoked_at);
+
+    create table if not exists page_activity (
+      id text primary key,
+      page_id text references pages(id) on delete cascade,
+      event_type text not null,
+      summary text not null,
+      actor text not null default 'system',
+      metadata_json text not null default '{}',
+      created_at timestamptz not null default now()
+    );
+
+    create index if not exists page_activity_page_id_created_at_idx on page_activity (page_id, created_at desc);
+    create index if not exists page_activity_created_at_idx on page_activity (created_at desc);
+  `);
+
+  await applyMigration(db, 8, `
+    create table if not exists page_source_artifacts (
+      id text primary key,
+      page_id text not null references pages(id) on delete cascade,
+      artifact_id text not null references source_artifacts(id) on delete cascade,
+      label text,
+      created_by text not null default 'system',
+      created_at timestamptz not null default now(),
+      deleted_at timestamptz,
+      unique (page_id, artifact_id)
+    );
+
+    create index if not exists page_source_artifacts_page_id_created_at_idx
+      on page_source_artifacts (page_id, created_at desc);
+    create index if not exists page_source_artifacts_artifact_id_idx
+      on page_source_artifacts (artifact_id);
+    create index if not exists page_source_artifacts_deleted_at_idx
+      on page_source_artifacts (deleted_at);
+  `);
+
+  await applyMigration(db, 9, `
+    alter table page_share_links add column if not exists password_hash text;
+    update page_share_links set password = null where password is not null;
+  `);
+
+  await applyMigration(db, 10, `
+    update pages set visibility = 'restricted' where visibility = 'private';
   `);
 
 }

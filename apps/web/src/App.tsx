@@ -18,11 +18,67 @@ type Page = {
   deletedAt: string | null;
   pinnedOrder: number | null;
   parentPageId: string | null;
+  visibility: "workspace" | "restricted" | "public";
+  owner: string;
+  permissionNote: string | null;
 };
 
 type PageDetail = Page & {
   backlinks: Page[];
   relatedPages: Page[];
+  comments: PageComment[];
+  shareLinks: PageShareLink[];
+  activity: PageActivity[];
+  sources: PageSourceArtifact[];
+};
+
+type PageComment = {
+  id: string;
+  pageId: string;
+  body: string;
+  anchorText: string | null;
+  createdBy: string;
+  createdAt: string;
+  deletedAt: string | null;
+};
+
+type PageShareLink = {
+  id: string;
+  pageId: string;
+  token: string;
+  label: string;
+  accessLevel: "view" | "comment";
+  hasPassword: boolean;
+  expiresAt: string | null;
+  createdBy: string;
+  createdAt: string;
+  revokedAt: string | null;
+};
+
+type PageActivity = {
+  id: string;
+  pageId: string | null;
+  eventType: string;
+  summary: string;
+  actor: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+type PageSourceArtifact = {
+  id: string;
+  pageId: string;
+  artifactId: string;
+  label: string | null;
+  sourceType: string;
+  title: string;
+  rawText: string;
+  metadata: Record<string, unknown>;
+  createdBy: string;
+  attachedBy: string;
+  createdAt: string;
+  attachedAt: string;
+  deletedAt: string | null;
 };
 
 type PageSearchResult = {
@@ -99,6 +155,7 @@ type RecallResponse = {
 };
 
 type DragTarget = { type: "root" } | { type: "page"; pageId: string };
+type PagePanelTab = "related" | "sources" | "comments" | "share" | "activity";
 
 function recallSources(result: RecallResult) {
   const sources = result.metadata.sources;
@@ -370,6 +427,16 @@ export function App() {
   const [memoryContent, setMemoryContent] = useState("");
   const [projectFormOpen, setProjectFormOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [pagePanelTab, setPagePanelTab] = useState<PagePanelTab>("related");
+  const [sourceTitle, setSourceTitle] = useState("");
+  const [sourceType, setSourceType] = useState("manual");
+  const [sourceLabel, setSourceLabel] = useState("");
+  const [sourceText, setSourceText] = useState("");
+  const [commentBody, setCommentBody] = useState("");
+  const [shareLabel, setShareLabel] = useState("");
+  const [permissionOwner, setPermissionOwner] = useState("");
+  const [permissionVisibility, setPermissionVisibility] = useState<Page["visibility"]>("workspace");
+  const [permissionNote, setPermissionNote] = useState("");
   const [saveState, setSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
   const [draggingPageId, setDraggingPageId] = useState<string | null>(null);
   const [dragTarget, setDragTarget] = useState<DragTarget | null>(null);
@@ -507,6 +574,16 @@ export function App() {
     }
   }, [editor, selectedId]);
 
+  useEffect(() => {
+    if (!selectedPage) {
+      return;
+    }
+
+    setPermissionOwner(selectedPage.owner);
+    setPermissionVisibility(selectedPage.visibility);
+    setPermissionNote(selectedPage.permissionNote ?? "");
+  }, [selectedPage?.id, selectedPage?.owner, selectedPage?.permissionNote, selectedPage?.visibility]);
+
   const visiblePages = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     const pagesWithDraftTitle = pages.map((page) =>
@@ -533,7 +610,10 @@ export function App() {
           updatedAt: result.updatedAt,
           deletedAt: null,
           pinnedOrder: null,
-          parentPageId: null
+          parentPageId: null,
+          visibility: "workspace" as const,
+          owner: "",
+          permissionNote: null
         }
       );
     });
@@ -660,6 +740,115 @@ export function App() {
     const response = await fetch(`/api/pages/${id}`);
     const data = (await response.json()) as { page: PageDetail };
     setPageDetail(data.page);
+  }
+
+  async function addPageSource() {
+    if (!selectedId || !sourceTitle.trim() || !sourceText.trim()) {
+      return;
+    }
+
+    await fetch(`/api/pages/${selectedId}/source-artifacts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceType: sourceType.trim() || "manual",
+        title: sourceTitle.trim(),
+        label: sourceLabel.trim() || null,
+        rawText: sourceText.trim(),
+        actor: "web"
+      })
+    });
+    setSourceTitle("");
+    setSourceLabel("");
+    setSourceText("");
+    await loadPageDetail(selectedId);
+  }
+
+  async function detachPageSource(source: PageSourceArtifact) {
+    if (!selectedId) {
+      return;
+    }
+
+    await fetch(`/api/pages/${selectedId}/source-artifacts/${source.id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: "web" })
+    });
+    await loadPageDetail(selectedId);
+  }
+
+  async function addPageComment() {
+    if (!selectedId || !commentBody.trim()) {
+      return;
+    }
+
+    await fetch(`/api/pages/${selectedId}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body: commentBody.trim(), actor: "web" })
+    });
+    setCommentBody("");
+    await loadPageDetail(selectedId);
+  }
+
+  async function deletePageComment(comment: PageComment) {
+    if (!selectedId) {
+      return;
+    }
+
+    await fetch(`/api/pages/${selectedId}/comments/${comment.id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: "web" })
+    });
+    await loadPageDetail(selectedId);
+  }
+
+  async function createPageShareLink() {
+    if (!selectedId) {
+      return;
+    }
+
+    await fetch(`/api/pages/${selectedId}/share-links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: shareLabel.trim() || "Share link", accessLevel: "view", actor: "web" })
+    });
+    setShareLabel("");
+    await loadPageDetail(selectedId);
+  }
+
+  async function revokePageShareLink(shareLink: PageShareLink) {
+    if (!selectedId) {
+      return;
+    }
+
+    await fetch(`/api/pages/${selectedId}/share-links/${shareLink.id}/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: "web" })
+    });
+    await loadPageDetail(selectedId);
+  }
+
+  async function savePagePermissions() {
+    if (!selectedId) {
+      return;
+    }
+
+    const response = await fetch(`/api/pages/${selectedId}/permissions`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        visibility: permissionVisibility,
+        owner: permissionOwner.trim() || "web",
+        permissionNote: permissionNote.trim() || null,
+        actor: "web"
+      })
+    });
+    const data = (await response.json()) as { page: Page };
+    setPages((current) => current.map((page) => (page.id === data.page.id ? data.page : page)));
+    await loadPageDetail(selectedId);
   }
 
   async function loadPageVersions(id: string) {
@@ -1500,24 +1689,221 @@ export function App() {
             </aside>
           )}
           {!htmlMode && !historyOpen && (
-            <aside className="relatedPanel">
-              <h2>Related content</h2>
-              {pageDetail?.relatedPages.length ? (
-                <div className="relatedList">
-                  {pageDetail.relatedPages.map((page) => (
-                    <button
-                      className="relatedItem"
-                      key={page.id}
-                      type="button"
-                      onClick={() => void selectPage(page)}
-                    >
-                      <span>{page.title}</span>
-                      <small>/{page.slug}</small>
+            <aside className="relatedPanel pageWorkspacePanel">
+              <div className="panelTabs" role="tablist" aria-label="Page tools">
+                {(["related", "sources", "comments", "share", "activity"] as PagePanelTab[]).map((tab) => (
+                  <button
+                    className={pagePanelTab === tab ? "active" : ""}
+                    key={tab}
+                    type="button"
+                    onClick={() => setPagePanelTab(tab)}
+                  >
+                    {tab === "related"
+                      ? "Links"
+                      : tab === "sources"
+                        ? "Sources"
+                        : tab === "comments"
+                          ? "Comments"
+                          : tab === "share"
+                            ? "Share"
+                            : "Activity"}
+                  </button>
+                ))}
+              </div>
+
+              {pagePanelTab === "related" && (
+                <section className="pagePanelSection">
+                  <h2>Related content</h2>
+                  {pageDetail?.relatedPages.length ? (
+                    <div className="relatedList">
+                      {pageDetail.relatedPages.map((page) => (
+                        <button
+                          className="relatedItem"
+                          key={page.id}
+                          type="button"
+                          onClick={() => void selectPage(page)}
+                        >
+                          <span>{page.title}</span>
+                          <small>/{page.slug}</small>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>No pages link here yet.</p>
+                  )}
+                </section>
+              )}
+
+              {pagePanelTab === "sources" && (
+                <section className="pagePanelSection">
+                  <h2>Sources</h2>
+                  <div className="sourceComposer">
+                    <div className="sourceFields">
+                      <input
+                        value={sourceTitle}
+                        onChange={(event) => setSourceTitle(event.target.value)}
+                        placeholder="Source title"
+                      />
+                      <input
+                        value={sourceType}
+                        onChange={(event) => setSourceType(event.target.value)}
+                        placeholder="Type"
+                      />
+                    </div>
+                    <input
+                      value={sourceLabel}
+                      onChange={(event) => setSourceLabel(event.target.value)}
+                      placeholder="Optional label"
+                    />
+                    <textarea
+                      value={sourceText}
+                      onChange={(event) => setSourceText(event.target.value)}
+                      placeholder="Paste meeting notes, document excerpts, or imported context"
+                    />
+                    <button type="button" onClick={addPageSource} disabled={!sourceTitle.trim() || !sourceText.trim()}>
+                      Attach source
                     </button>
-                  ))}
-                </div>
-              ) : (
-                <p>No pages link here yet.</p>
+                  </div>
+                  {pageDetail?.sources.length ? (
+                    <div className="sourceList">
+                      {pageDetail.sources.map((source) => (
+                        <article className="sourceItem" key={source.id}>
+                          <div>
+                            <strong>{source.label || source.title}</strong>
+                            <small>
+                              {source.sourceType} · {source.attachedBy}
+                            </small>
+                          </div>
+                          <p>{source.rawText.replace(/\s+/g, " ").slice(0, 180)}</p>
+                          <button type="button" onClick={() => detachPageSource(source)}>
+                            Detach
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>No sources attached yet.</p>
+                  )}
+                </section>
+              )}
+
+              {pagePanelTab === "comments" && (
+                <section className="pagePanelSection">
+                  <h2>Comments</h2>
+                  <div className="commentComposer">
+                    <textarea
+                      value={commentBody}
+                      onChange={(event) => setCommentBody(event.target.value)}
+                      placeholder="Add a comment"
+                    />
+                    <button type="button" onClick={addPageComment} disabled={!commentBody.trim()}>
+                      Add
+                    </button>
+                  </div>
+                  {pageDetail?.comments.length ? (
+                    <div className="commentList">
+                      {pageDetail.comments.map((comment) => (
+                        <article className="commentItem" key={comment.id}>
+                          <p>{comment.body}</p>
+                          <div>
+                            <small>
+                              {comment.createdBy} · {new Date(comment.createdAt).toLocaleString()}
+                            </small>
+                            <button type="button" onClick={() => deletePageComment(comment)}>
+                              Remove
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>No comments yet.</p>
+                  )}
+                </section>
+              )}
+
+              {pagePanelTab === "share" && (
+                <section className="pagePanelSection">
+                  <h2>Sharing</h2>
+                  <div className="permissionBox">
+                    <label>
+                      <span>Audience label</span>
+                      <select
+                        value={permissionVisibility}
+                        onChange={(event) => setPermissionVisibility(event.target.value as Page["visibility"])}
+                      >
+                        <option value="workspace">Workspace</option>
+                        <option value="restricted">Restricted note</option>
+                        <option value="public">Public note</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Owner</span>
+                      <input value={permissionOwner} onChange={(event) => setPermissionOwner(event.target.value)} />
+                    </label>
+                    <label>
+                      <span>Note</span>
+                      <textarea
+                        value={permissionNote}
+                        onChange={(event) => setPermissionNote(event.target.value)}
+                        placeholder="Permission context"
+                      />
+                    </label>
+                    <button type="button" onClick={savePagePermissions}>
+                      Save permissions
+                    </button>
+                  </div>
+                  <div className="shareComposer">
+                    <input
+                      value={shareLabel}
+                      onChange={(event) => setShareLabel(event.target.value)}
+                      placeholder="Share label"
+                    />
+                    <button type="button" onClick={createPageShareLink}>
+                      New link
+                    </button>
+                  </div>
+                  {pageDetail?.shareLinks.length ? (
+                    <div className="shareList">
+                      {pageDetail.shareLinks.map((shareLink) => (
+                        <article className={shareLink.revokedAt ? "shareItem revoked" : "shareItem"} key={shareLink.id}>
+                          <strong>{shareLink.label}</strong>
+                          <code>/share/{shareLink.token}</code>
+                          <small>
+                            {shareLink.revokedAt ? "Revoked" : shareLink.accessLevel} · {shareLink.createdBy}
+                          </small>
+                          {!shareLink.revokedAt && (
+                            <button type="button" onClick={() => revokePageShareLink(shareLink)}>
+                              Revoke
+                            </button>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>No share links yet.</p>
+                  )}
+                </section>
+              )}
+
+              {pagePanelTab === "activity" && (
+                <section className="pagePanelSection">
+                  <h2>Activity</h2>
+                  {pageDetail?.activity.length ? (
+                    <div className="activityList">
+                      {pageDetail.activity.map((event) => (
+                        <article className="activityItem" key={event.id}>
+                          <span>{event.summary}</span>
+                          <small>
+                            {event.actor} · {new Date(event.createdAt).toLocaleString()}
+                          </small>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>No page activity yet.</p>
+                  )}
+                </section>
               )}
             </aside>
           )}

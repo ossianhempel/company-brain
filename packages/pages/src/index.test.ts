@@ -3,16 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createDb } from "@company-brain/db";
+import { createDb, type CompanyBrainDb } from "@company-brain/db";
 import { createPageStore } from "./index.ts";
 
-async function withPageStore<T>(run: (pages: Awaited<ReturnType<typeof createPageStore>>) => Promise<T>) {
+async function withPageStore<T>(
+  run: (pages: Awaited<ReturnType<typeof createPageStore>>, db: CompanyBrainDb) => Promise<T>
+) {
   const dataDir = await mkdtemp(join(tmpdir(), "company-brain-pages-test-"));
   const db = await createDb(dataDir);
 
   try {
     const pages = await createPageStore(db);
-    return await run(pages);
+    return await run(pages, db);
   } finally {
     await db.close();
     await rm(dataDir, { recursive: true, force: true });
@@ -198,6 +200,112 @@ test("lists, reads, and restores page versions without deleting history", async 
 
     const searchResults = await pages.search("First body");
     assert.equal(searchResults[0].pageId, page.id);
+  });
+});
+
+test("tracks v1 page collaboration data and activity", async () => {
+  await withPageStore(async (pages, db) => {
+    const page = await pages.create({
+      title: "Team Handbook",
+      html: "<h1>Team Handbook</h1><p>Operating notes.</p>",
+      actor: "owner",
+      visibility: "restricted",
+      owner: "ops"
+    });
+
+    assert.equal(page.visibility, "restricted");
+    assert.equal(page.owner, "ops");
+
+    const updatedPermissions = await pages.updatePermissions(page.id, {
+      visibility: "workspace",
+      owner: "lead",
+      permissionNote: "Visible to the default workspace.",
+      actor: "admin"
+    });
+    assert.equal(updatedPermissions?.visibility, "workspace");
+    assert.equal(updatedPermissions?.owner, "lead");
+    assert.equal(updatedPermissions?.permissionNote, "Visible to the default workspace.");
+
+    const comment = await pages.addComment(page.id, {
+      body: "Clarify the escalation owner.",
+      anchorText: "Operating notes",
+      actor: "reviewer"
+    });
+    assert.equal(comment?.body, "Clarify the escalation owner.");
+    assert.equal(comment?.anchorText, "Operating notes");
+
+    const shareLink = await pages.createShareLink(page.id, {
+      label: "Client read-only",
+      accessLevel: "view",
+      password: "secret",
+      actor: "admin"
+    });
+    assert.equal(shareLink?.label, "Client read-only");
+    assert.equal(shareLink?.hasPassword, true);
+    assert.equal(shareLink?.revokedAt, null);
+    const storedShareLink = await db.query<{ password: string | null; password_hash: string | null }>(
+      "select password, password_hash from page_share_links where id = $1",
+      [shareLink.id]
+    );
+    assert.equal(storedShareLink.rows[0]?.password, null);
+    assert.notEqual(storedShareLink.rows[0]?.password_hash, "secret");
+    assert.match(storedShareLink.rows[0]?.password_hash ?? "", /^scrypt\$/);
+
+    const detail = await pages.getWithRelations(page.id);
+    assert.equal(detail?.comments.length, 1);
+    assert.equal(detail?.shareLinks.length, 1);
+    assert.ok(detail?.activity.some((event) => event.eventType === "comment.created"));
+    assert.ok(detail?.activity.some((event) => event.eventType === "permissions.updated"));
+
+    const revoked = await pages.revokeShareLink(page.id, shareLink.id, "admin");
+    assert.ok(revoked?.revokedAt);
+
+    const deletedComment = await pages.deleteComment(page.id, comment.id, "reviewer");
+    assert.ok(deletedComment?.deletedAt);
+
+    const finalDetail = await pages.getWithRelations(page.id);
+    assert.equal(finalDetail?.comments.length, 0);
+    assert.equal(finalDetail?.shareLinks[0]?.revokedAt !== null, true);
+    assert.ok(finalDetail?.activity.some((event) => event.eventType === "share.revoked"));
+  });
+});
+
+test("attaches source artifacts to pages and keeps them recall-indexed", async () => {
+  await withPageStore(async (pages, db) => {
+    const page = await pages.create({
+      title: "Client Notes",
+      html: "<h1>Client Notes</h1><p>Source-backed context.</p>",
+      actor: "owner"
+    });
+
+    const source = await pages.createAndAttachSourceArtifact(page.id, {
+      sourceType: "meeting_note",
+      title: "Kickoff Notes",
+      rawText: "The client prefers weekly Friday summaries and wants Azure DevOps links included.",
+      label: "Kickoff",
+      actor: "researcher"
+    });
+
+    assert.equal(source?.title, "Kickoff Notes");
+    assert.equal(source?.label, "Kickoff");
+    assert.equal(source?.sourceType, "meeting_note");
+
+    const detail = await pages.getWithRelations(page.id);
+    assert.equal(detail?.sources.length, 1);
+    assert.equal(detail?.sources[0]?.title, "Kickoff Notes");
+    assert.ok(detail?.activity.some((event) => event.eventType === "source.attached"));
+
+    const chunks = await db.query<{ count: string }>("select count(*)::text as count from source_chunks where artifact_id = $1", [
+      source?.artifactId
+    ]);
+    assert.equal(Number(chunks.rows[0]?.count ?? 0), 1);
+
+    const detached = await pages.detachSourceArtifact(page.id, source.id, "owner");
+    assert.ok(detached?.deletedAt);
+
+    const afterDetach = await pages.getWithRelations(page.id);
+    assert.equal(afterDetach?.sources.length, 0);
+    assert.ok(afterDetach?.activity.some((event) => event.eventType === "source.detached"));
   });
 });
 

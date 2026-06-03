@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "COMPANY_BRAIN_DATA_DIR=../../data/pgdata tsx watch src/index.ts",
+    "dev": "COMPANY_BRAIN_DATA_DIR=${COMPANY_BRAIN_DATA_DIR:-../../data/pgdata} tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

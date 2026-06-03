@@ -33,8 +33,12 @@ const migrationTables = [
   "page_links",
   "page_versions",
   "page_chunks",
+  "page_comments",
+  "page_share_links",
+  "page_activity",
   "source_artifacts",
   "source_chunks",
+  "page_source_artifacts",
   "memories",
   "memory_sources"
 ];

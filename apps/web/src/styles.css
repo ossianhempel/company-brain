@@ -624,6 +624,9 @@ textarea {
 
 .relatedPanel {
   background: #fcfcfc;
+  overflow: auto;
+  border-left: 1px solid var(--color-border);
+  padding: 14px;
 }
 
 .relatedPanel h2,
@@ -639,6 +642,251 @@ textarea {
   margin: 0;
   color: var(--color-subtle);
   font-size: 13px;
+}
+
+.pageWorkspacePanel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panelTabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-selected);
+  padding: 3px;
+}
+
+.panelTabs button {
+  min-width: 0;
+  height: 26px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-subtle);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.panelTabs button.active,
+.panelTabs button:hover {
+  background: var(--color-surface);
+  color: var(--color-strong);
+}
+
+.pagePanelSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sourceComposer,
+.commentComposer,
+.shareComposer {
+  display: grid;
+  gap: 6px;
+}
+
+.commentComposer,
+.shareComposer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.sourceFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px);
+  gap: 6px;
+}
+
+.sourceComposer textarea,
+.commentComposer textarea,
+.permissionBox textarea,
+.sourceComposer input,
+.permissionBox input,
+.permissionBox select,
+.shareComposer input {
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--color-surface);
+  color: var(--color-default);
+  font-size: 13px;
+}
+
+.sourceComposer textarea,
+.commentComposer textarea,
+.permissionBox textarea {
+  min-height: 58px;
+  resize: vertical;
+  padding: 7px 8px;
+  line-height: 1.4;
+}
+
+.sourceComposer input,
+.permissionBox input,
+.permissionBox select,
+.shareComposer input {
+  height: 30px;
+  padding: 0 8px;
+}
+
+.sourceComposer button,
+.commentComposer button,
+.commentItem button,
+.permissionBox button,
+.shareComposer button,
+.shareItem button {
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--color-selected);
+  color: var(--color-strong);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sourceComposer button:hover:not(:disabled),
+.commentComposer button:hover:not(:disabled),
+.commentItem button:hover,
+.permissionBox button:hover,
+.shareComposer button:hover,
+.shareItem button:hover {
+  border-color: var(--color-border);
+}
+
+.sourceComposer button:disabled,
+.commentComposer button:disabled {
+  color: var(--color-subtle);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.sourceList,
+.commentList,
+.shareList,
+.activityList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sourceItem,
+.commentItem,
+.shareItem,
+.activityItem {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 9px;
+}
+
+.sourceItem div {
+  display: grid;
+  gap: 2px;
+}
+
+.sourceItem p {
+  margin: 0;
+  color: var(--color-default);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sourceItem button {
+  align-self: flex-start;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--color-selected);
+  color: var(--color-strong);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sourceItem button:hover {
+  border-color: var(--color-border);
+}
+
+.commentItem p {
+  color: var(--color-default);
+}
+
+.commentItem div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sourceItem small,
+.commentItem small,
+.shareItem small,
+.activityItem small {
+  overflow: hidden;
+  color: var(--color-subtle);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permissionBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 9px;
+}
+
+.permissionBox label {
+  display: grid;
+  gap: 4px;
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.sourceItem strong,
+.shareItem strong,
+.activityItem span {
+  overflow: hidden;
+  color: var(--color-strong);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shareItem code {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-selected);
+  padding: 3px 5px;
+  color: var(--color-default);
+  font-family: "SF Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shareItem.revoked {
+  opacity: 0.64;
 }
 
 .historyPanel {

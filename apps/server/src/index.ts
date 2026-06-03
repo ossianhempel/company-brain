@@ -18,6 +18,37 @@ const pageMoveInput = z.object({
   parentPageId: z.string().min(1).nullable().optional(),
   actor: z.string().min(1).optional()
 });
+const pageCommentInput = z.object({
+  body: z.string().min(1),
+  anchorText: z.string().min(1).nullable().optional(),
+  actor: z.string().min(1).optional()
+});
+const pageShareInput = z.object({
+  label: z.string().min(1).optional(),
+  accessLevel: z.enum(["view", "comment"]).optional(),
+  password: z.string().min(1).nullable().optional(),
+  expiresAt: z.string().datetime().nullable().optional(),
+  actor: z.string().min(1).optional()
+});
+const pagePermissionInput = z.object({
+  visibility: z.enum(["workspace", "restricted", "public"]).optional(),
+  owner: z.string().min(1).optional(),
+  permissionNote: z.string().nullable().optional(),
+  actor: z.string().min(1).optional()
+});
+const pageSourceInput = z.object({
+  sourceType: z.string().min(1),
+  title: z.string().min(1),
+  rawText: z.string().min(1),
+  label: z.string().min(1).nullable().optional(),
+  metadata: z.record(z.unknown()).optional(),
+  actor: z.string().min(1).optional()
+});
+const pageSourceAttachInput = z.object({
+  artifactId: z.string().min(1),
+  label: z.string().min(1).nullable().optional(),
+  actor: z.string().min(1).optional()
+});
 const searchInput = z.object({
   q: z.string().min(1),
   limit: z.coerce.number().int().min(1).max(100).optional()
@@ -238,8 +269,111 @@ app.post("/api/pages/:id/move", async (c) => {
   }
 });
 
+app.post("/api/pages/:id/comments", async (c) => {
+  const body = pageCommentInput.parse(await c.req.json());
+  try {
+    const comment = await pages.addComment(c.req.param("id"), body);
+    if (!comment) {
+      return c.json({ error: "Page not found" }, 404);
+    }
+
+    return c.json({ comment }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Comment failed" }, 400);
+  }
+});
+
+app.delete("/api/pages/:id/comments/:commentId", async (c) => {
+  const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
+  const comment = await pages.deleteComment(c.req.param("id"), c.req.param("commentId"), body.actor);
+  if (!comment) {
+    return c.json({ error: "Comment not found" }, 404);
+  }
+
+  return c.json({ comment });
+});
+
+app.post("/api/pages/:id/share-links", async (c) => {
+  const body = pageShareInput.parse(await c.req.json().catch(() => ({})));
+  const shareLink = await pages.createShareLink(c.req.param("id"), body);
+  if (!shareLink) {
+    return c.json({ error: "Page not found" }, 404);
+  }
+
+  return c.json({ shareLink }, 201);
+});
+
+app.post("/api/pages/:id/share-links/:shareLinkId/revoke", async (c) => {
+  const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
+  const shareLink = await pages.revokeShareLink(c.req.param("id"), c.req.param("shareLinkId"), body.actor);
+  if (!shareLink) {
+    return c.json({ error: "Share link not found" }, 404);
+  }
+
+  return c.json({ shareLink });
+});
+
+app.put("/api/pages/:id/permissions", async (c) => {
+  const body = pagePermissionInput.parse(await c.req.json());
+  const page = await pages.updatePermissions(c.req.param("id"), body);
+  if (!page) {
+    return c.json({ error: "Page not found" }, 404);
+  }
+
+  return c.json({ page });
+});
+
+app.post("/api/pages/:id/source-artifacts", async (c) => {
+  const body = pageSourceInput.parse(await c.req.json());
+  const source = await pages.createAndAttachSourceArtifact(c.req.param("id"), body);
+  if (!source) {
+    return c.json({ error: "Page not found" }, 404);
+  }
+
+  return c.json({ source }, 201);
+});
+
+app.post("/api/pages/:id/source-artifacts/attach", async (c) => {
+  const body = pageSourceAttachInput.parse(await c.req.json());
+  try {
+    const source = await pages.attachSourceArtifact(c.req.param("id"), body);
+    if (!source) {
+      return c.json({ error: "Page not found" }, 404);
+    }
+
+    return c.json({ source }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Source attach failed" }, 400);
+  }
+});
+
+app.delete("/api/pages/:id/source-artifacts/:sourceId", async (c) => {
+  const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
+  const source = await pages.detachSourceArtifact(c.req.param("id"), c.req.param("sourceId"), body.actor);
+  if (!source) {
+    return c.json({ error: "Page source not found" }, 404);
+  }
+
+  return c.json({ source });
+});
+
 const port = Number(process.env.PORT ?? 3000);
 
-serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Company Brain server listening on http://localhost:${info.port}`);
+});
+
+async function shutdown() {
+  server.close(async () => {
+    await db.close();
+    process.exit(0);
+  });
+}
+
+process.once("SIGINT", () => {
+  void shutdown();
+});
+
+process.once("SIGTERM", () => {
+  void shutdown();
 });

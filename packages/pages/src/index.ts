@@ -1,6 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, scrypt as scryptCallback } from "node:crypto";
+import { promisify } from "node:util";
 import sanitizeHtml from "sanitize-html";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+
+const scrypt = promisify(scryptCallback);
 
 export type Page = {
   id: string;
@@ -16,6 +19,9 @@ export type Page = {
   deletedAt: string | null;
   pinnedOrder: number | null;
   parentPageId: string | null;
+  visibility: "workspace" | "restricted" | "public";
+  owner: string;
+  permissionNote: string | null;
 };
 
 export type PageLink = {
@@ -29,6 +35,10 @@ export type PageWithRelations = Page & {
   outgoingLinks: PageLink[];
   backlinks: Page[];
   relatedPages: Page[];
+  comments: PageComment[];
+  shareLinks: PageShareLink[];
+  activity: PageActivity[];
+  sources: PageSourceArtifact[];
 };
 
 export type PageSearchResult = {
@@ -54,6 +64,55 @@ export type PageVersion = {
   createdAt: string;
 };
 
+export type PageComment = {
+  id: string;
+  pageId: string;
+  body: string;
+  anchorText: string | null;
+  createdBy: string;
+  createdAt: string;
+  deletedAt: string | null;
+};
+
+export type PageShareLink = {
+  id: string;
+  pageId: string;
+  token: string;
+  label: string;
+  accessLevel: "view" | "comment";
+  hasPassword: boolean;
+  expiresAt: string | null;
+  createdBy: string;
+  createdAt: string;
+  revokedAt: string | null;
+};
+
+export type PageActivity = {
+  id: string;
+  pageId: string | null;
+  eventType: string;
+  summary: string;
+  actor: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type PageSourceArtifact = {
+  id: string;
+  pageId: string;
+  artifactId: string;
+  label: string | null;
+  sourceType: string;
+  title: string;
+  rawText: string;
+  metadata: Record<string, unknown>;
+  createdBy: string;
+  attachedBy: string;
+  createdAt: string;
+  attachedAt: string;
+  deletedAt: string | null;
+};
+
 type PageRow = {
   id: string;
   title: string;
@@ -68,6 +127,9 @@ type PageRow = {
   deleted_at: string | Date | null;
   pinned_order: number | null;
   parent_page_id: string | null;
+  visibility: "workspace" | "restricted" | "public";
+  owner: string;
+  permission_note: string | null;
 };
 
 type PageVersionRow = {
@@ -98,12 +160,65 @@ type PageChunkRow = {
   token_count: number;
 };
 
+type PageCommentRow = {
+  id: string;
+  page_id: string;
+  body: string;
+  anchor_text: string | null;
+  created_by: string;
+  created_at: string | Date;
+  deleted_at: string | Date | null;
+};
+
+type PageShareLinkRow = {
+  id: string;
+  page_id: string;
+  token: string;
+  label: string;
+  access_level: "view" | "comment";
+  password: string | null;
+  password_hash: string | null;
+  expires_at: string | Date | null;
+  created_by: string;
+  created_at: string | Date;
+  revoked_at: string | Date | null;
+};
+
+type PageActivityRow = {
+  id: string;
+  page_id: string | null;
+  event_type: string;
+  summary: string;
+  actor: string;
+  metadata_json: string;
+  created_at: string | Date;
+};
+
+type PageSourceArtifactRow = {
+  id: string;
+  page_id: string;
+  artifact_id: string;
+  label: string | null;
+  source_type: string;
+  title: string;
+  raw_text: string;
+  metadata_json: string;
+  artifact_created_by: string;
+  attached_by: string;
+  artifact_created_at: string | Date;
+  attached_at: string | Date;
+  deleted_at: string | Date | null;
+};
+
 type PageInput = {
   title: string;
   html: string;
   actor?: string;
   pinnedOrder?: number | null;
   parentPageId?: string | null;
+  visibility?: Page["visibility"];
+  owner?: string;
+  permissionNote?: string | null;
 };
 
 type PreparedPageInput = {
@@ -247,7 +362,10 @@ function toPage(row: PageRow): Page {
     updatedAt: normalizeTimestamp(row.updated_at),
     deletedAt: row.deleted_at ? normalizeTimestamp(row.deleted_at) : null,
     pinnedOrder: row.pinned_order,
-    parentPageId: row.parent_page_id
+    parentPageId: row.parent_page_id,
+    visibility: row.visibility ?? "workspace",
+    owner: row.owner ?? "system",
+    permissionNote: row.permission_note
   };
 }
 
@@ -274,6 +392,83 @@ function toPageVersion(row: PageVersionRow): PageVersion {
     plainText: row.plain_text,
     createdBy: row.created_by,
     createdAt: normalizeTimestamp(row.created_at)
+  };
+}
+
+function toPageComment(row: PageCommentRow): PageComment {
+  return {
+    id: row.id,
+    pageId: row.page_id,
+    body: row.body,
+    anchorText: row.anchor_text,
+    createdBy: row.created_by,
+    createdAt: normalizeTimestamp(row.created_at),
+    deletedAt: row.deleted_at ? normalizeTimestamp(row.deleted_at) : null
+  };
+}
+
+function toPageShareLink(row: PageShareLinkRow): PageShareLink {
+  return {
+    id: row.id,
+    pageId: row.page_id,
+    token: row.token,
+    label: row.label,
+    accessLevel: row.access_level,
+    hasPassword: Boolean(row.password_hash),
+    expiresAt: row.expires_at ? normalizeTimestamp(row.expires_at) : null,
+    createdBy: row.created_by,
+    createdAt: normalizeTimestamp(row.created_at),
+    revokedAt: row.revoked_at ? normalizeTimestamp(row.revoked_at) : null
+  };
+}
+
+async function hashSharePassword(password: string) {
+  const salt = randomBytes(16).toString("base64url");
+  const key = (await scrypt(password, salt, 64)) as Buffer;
+  return `scrypt$${salt}$${key.toString("base64url")}`;
+}
+
+function toPageActivity(row: PageActivityRow): PageActivity {
+  let metadata: Record<string, unknown> = {};
+  try {
+    metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+  } catch {
+    metadata = {};
+  }
+
+  return {
+    id: row.id,
+    pageId: row.page_id,
+    eventType: row.event_type,
+    summary: row.summary,
+    actor: row.actor,
+    metadata,
+    createdAt: normalizeTimestamp(row.created_at)
+  };
+}
+
+function toPageSourceArtifact(row: PageSourceArtifactRow): PageSourceArtifact {
+  let metadata: Record<string, unknown> = {};
+  try {
+    metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+  } catch {
+    metadata = {};
+  }
+
+  return {
+    id: row.id,
+    pageId: row.page_id,
+    artifactId: row.artifact_id,
+    label: row.label,
+    sourceType: row.source_type,
+    title: row.title,
+    rawText: row.raw_text,
+    metadata,
+    createdBy: row.artifact_created_by,
+    attachedBy: row.attached_by,
+    createdAt: normalizeTimestamp(row.artifact_created_at),
+    attachedAt: normalizeTimestamp(row.attached_at),
+    deletedAt: row.deleted_at ? normalizeTimestamp(row.deleted_at) : null
   };
 }
 
@@ -438,6 +633,47 @@ function estimateTokenCount(text: string) {
   return Math.ceil(text.trim().split(/\s+/).filter(Boolean).length * 1.35);
 }
 
+function estimateSourceTokenCount(text: string) {
+  return Math.ceil(text.trim().split(/\s+/).filter(Boolean).length * 1.35);
+}
+
+function splitSourceText(text: string, maxWords = 180) {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const chunks: string[] = [];
+  let current: string[] = [];
+
+  for (const paragraph of paragraphs.length ? paragraphs : [text.replace(/\s+/g, " ").trim()].filter(Boolean)) {
+    const words = paragraph.split(/\s+/);
+    if (current.length + words.length > maxWords && current.length > 0) {
+      chunks.push(current.join(" "));
+      current = [];
+    }
+
+    if (words.length > maxWords) {
+      if (current.length > 0) {
+        chunks.push(current.join(" "));
+        current = [];
+      }
+
+      for (let index = 0; index < words.length; index += maxWords) {
+        chunks.push(words.slice(index, index + maxWords).join(" "));
+      }
+      continue;
+    }
+
+    current.push(...words);
+  }
+
+  if (current.length > 0) {
+    chunks.push(current.join(" "));
+  }
+
+  return chunks;
+}
+
 function extractPageChunks(html: string, fallbackTitle: string) {
   const sectionPattern = /<(h[1-3])[^>]*>(.*?)<\/\1>/gis;
   const matches = [...html.matchAll(sectionPattern)];
@@ -594,6 +830,23 @@ async function snapshotPage(db: CompanyBrainDb, page: Page, actor: string) {
   );
 }
 
+async function recordPageActivity(
+  db: CompanyBrainDb,
+  pageId: string | null,
+  eventType: string,
+  summary: string,
+  actor: string,
+  metadata: Record<string, unknown> = {}
+) {
+  await db.query(
+    `
+      insert into page_activity (id, page_id, event_type, summary, actor, metadata_json)
+      values ($1, $2, $3, $4, $5, $6)
+    `,
+    [randomUUID(), pageId, eventType, summary, actor, JSON.stringify(metadata)]
+  );
+}
+
 async function reindexPageChunks(db: CompanyBrainDb, pageId: string, title: string, html: string) {
   const chunks = extractPageChunks(html, title);
   await db.query("delete from page_chunks where page_id = $1", [pageId]);
@@ -743,6 +996,59 @@ export async function createPageStore(db?: CompanyBrainDb) {
       }
 
       const outgoing = await pageDb.query<PageLinkRow>("select * from page_links where source_page_id = $1", [id]);
+      const comments = await pageDb.query<PageCommentRow>(
+        `
+          select *
+          from page_comments
+          where page_id = $1 and deleted_at is null
+          order by created_at desc
+        `,
+        [id]
+      );
+      const shareLinks = await pageDb.query<PageShareLinkRow>(
+        `
+          select *
+          from page_share_links
+          where page_id = $1
+          order by created_at desc
+        `,
+        [id]
+      );
+      const activity = await pageDb.query<PageActivityRow>(
+        `
+          select *
+          from page_activity
+          where page_id = $1
+          order by created_at desc
+          limit 50
+        `,
+        [id]
+      );
+      const sources = await pageDb.query<PageSourceArtifactRow>(
+        `
+          select
+            page_source_artifacts.id,
+            page_source_artifacts.page_id,
+            page_source_artifacts.artifact_id,
+            page_source_artifacts.label,
+            source_artifacts.source_type,
+            source_artifacts.title,
+            source_artifacts.raw_text,
+            source_artifacts.metadata_json,
+            source_artifacts.created_by as artifact_created_by,
+            page_source_artifacts.created_by as attached_by,
+            source_artifacts.created_at as artifact_created_at,
+            page_source_artifacts.created_at as attached_at,
+            page_source_artifacts.deleted_at
+          from page_source_artifacts
+          join source_artifacts on source_artifacts.id = page_source_artifacts.artifact_id
+          where page_source_artifacts.page_id = $1
+            and page_source_artifacts.deleted_at is null
+            and source_artifacts.deleted_at is null
+          order by page_source_artifacts.created_at desc
+        `,
+        [id]
+      );
       const backlinkRows = await pageDb.query<PageRow>(
         `
           select distinct pages.*
@@ -760,8 +1066,277 @@ export async function createPageStore(db?: CompanyBrainDb) {
         ...page,
         outgoingLinks: outgoing.rows.map(toPageLink),
         backlinks,
-        relatedPages: backlinks
+        relatedPages: backlinks,
+        comments: comments.rows.map(toPageComment),
+        shareLinks: shareLinks.rows.map(toPageShareLink),
+        activity: activity.rows.map(toPageActivity),
+        sources: sources.rows.map(toPageSourceArtifact)
       };
+    },
+
+    async attachSourceArtifact(id: string, input: { artifactId: string; label?: string | null; actor?: string }) {
+      const page = await this.get(id);
+      if (!page) {
+        return null;
+      }
+
+      const artifact = await pageDb.query<{ id: string; title: string }>(
+        "select id, title from source_artifacts where id = $1 and deleted_at is null",
+        [input.artifactId]
+      );
+      if (!artifact.rows[0]) {
+        throw new Error("Source artifact not found.");
+      }
+
+      const actor = input.actor ?? "local-user";
+      const result = await pageDb.query<PageSourceArtifactRow>(
+        `
+          insert into page_source_artifacts (id, page_id, artifact_id, label, created_by)
+          values ($1, $2, $3, $4, $5)
+          on conflict (page_id, artifact_id)
+          do update set
+            label = excluded.label,
+            created_by = excluded.created_by,
+            created_at = now(),
+            deleted_at = null
+          returning
+            page_source_artifacts.id,
+            page_source_artifacts.page_id,
+            page_source_artifacts.artifact_id,
+            page_source_artifacts.label,
+            (select source_type from source_artifacts where id = page_source_artifacts.artifact_id) as source_type,
+            (select title from source_artifacts where id = page_source_artifacts.artifact_id) as title,
+            (select raw_text from source_artifacts where id = page_source_artifacts.artifact_id) as raw_text,
+            (select metadata_json from source_artifacts where id = page_source_artifacts.artifact_id) as metadata_json,
+            (select created_by from source_artifacts where id = page_source_artifacts.artifact_id) as artifact_created_by,
+            page_source_artifacts.created_by as attached_by,
+            (select created_at from source_artifacts where id = page_source_artifacts.artifact_id) as artifact_created_at,
+            page_source_artifacts.created_at as attached_at,
+            page_source_artifacts.deleted_at
+        `,
+        [randomUUID(), id, input.artifactId, input.label?.trim() || null, actor]
+      );
+      await recordPageActivity(pageDb, id, "source.attached", `Attached ${artifact.rows[0].title}`, actor, {
+        artifactId: input.artifactId
+      });
+      return toPageSourceArtifact(result.rows[0]);
+    },
+
+    async createAndAttachSourceArtifact(
+      id: string,
+      input: {
+        sourceType: string;
+        title: string;
+        rawText: string;
+        label?: string | null;
+        metadata?: Record<string, unknown>;
+        actor?: string;
+      }
+    ) {
+      const page = await this.get(id);
+      if (!page) {
+        return null;
+      }
+
+      const actor = input.actor ?? "local-user";
+      const artifactId = randomUUID();
+      await pageDb.query(
+        `
+          insert into source_artifacts (id, source_type, title, raw_text, metadata_json, created_by)
+          values ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          artifactId,
+          input.sourceType.trim() || "manual",
+          input.title.trim(),
+          input.rawText,
+          JSON.stringify(input.metadata ?? { pageId: id, attachedFrom: "page" }),
+          actor
+        ]
+      );
+
+      for (const [index, text] of splitSourceText(input.rawText).entries()) {
+        await pageDb.query(
+          `
+            insert into source_chunks (id, artifact_id, chunk_index, text, token_count)
+            values ($1, $2, $3, $4, $5)
+          `,
+          [randomUUID(), artifactId, index, text, estimateSourceTokenCount(text)]
+        );
+      }
+
+      return this.attachSourceArtifact(id, {
+        artifactId,
+        label: input.label,
+        actor
+      });
+    },
+
+    async detachSourceArtifact(id: string, sourceId: string, actor = "local-user") {
+      const result = await pageDb.query<PageSourceArtifactRow>(
+        `
+          update page_source_artifacts
+          set deleted_at = now()
+          where id = $1 and page_id = $2 and deleted_at is null
+          returning
+            page_source_artifacts.id,
+            page_source_artifacts.page_id,
+            page_source_artifacts.artifact_id,
+            page_source_artifacts.label,
+            (select source_type from source_artifacts where id = page_source_artifacts.artifact_id) as source_type,
+            (select title from source_artifacts where id = page_source_artifacts.artifact_id) as title,
+            (select raw_text from source_artifacts where id = page_source_artifacts.artifact_id) as raw_text,
+            (select metadata_json from source_artifacts where id = page_source_artifacts.artifact_id) as metadata_json,
+            (select created_by from source_artifacts where id = page_source_artifacts.artifact_id) as artifact_created_by,
+            page_source_artifacts.created_by as attached_by,
+            (select created_at from source_artifacts where id = page_source_artifacts.artifact_id) as artifact_created_at,
+            page_source_artifacts.created_at as attached_at,
+            page_source_artifacts.deleted_at
+        `,
+        [sourceId, id]
+      );
+      const row = result.rows[0];
+      if (!row) {
+        return null;
+      }
+
+      await recordPageActivity(pageDb, id, "source.detached", `Detached ${row.title}`, actor, {
+        artifactId: row.artifact_id
+      });
+      return toPageSourceArtifact(row);
+    },
+
+    async addComment(id: string, input: { body: string; anchorText?: string | null; actor?: string }) {
+      const page = await this.get(id);
+      if (!page) {
+        return null;
+      }
+
+      const actor = input.actor ?? "local-user";
+      const body = input.body.trim();
+      if (!body) {
+        throw new Error("Comment body is required.");
+      }
+
+      const result = await pageDb.query<PageCommentRow>(
+        `
+          insert into page_comments (id, page_id, body, anchor_text, created_by)
+          values ($1, $2, $3, $4, $5)
+          returning *
+        `,
+        [randomUUID(), id, body, input.anchorText?.trim() || null, actor]
+      );
+      await recordPageActivity(pageDb, id, "comment.created", "Comment added", actor);
+      return toPageComment(result.rows[0]);
+    },
+
+    async deleteComment(id: string, commentId: string, actor = "local-user") {
+      const result = await pageDb.query<PageCommentRow>(
+        `
+          update page_comments
+          set deleted_at = now()
+          where id = $1 and page_id = $2 and deleted_at is null
+          returning *
+        `,
+        [commentId, id]
+      );
+      const row = result.rows[0];
+      if (!row) {
+        return null;
+      }
+
+      await recordPageActivity(pageDb, id, "comment.deleted", "Comment removed", actor);
+      return toPageComment(row);
+    },
+
+    async createShareLink(
+      id: string,
+      input: {
+        label?: string;
+        accessLevel?: PageShareLink["accessLevel"];
+        password?: string | null;
+        expiresAt?: string | null;
+        actor?: string;
+      }
+    ) {
+      const page = await this.get(id);
+      if (!page) {
+        return null;
+      }
+
+      const actor = input.actor ?? "local-user";
+      const passwordHash = input.password?.trim() ? await hashSharePassword(input.password.trim()) : null;
+      const result = await pageDb.query<PageShareLinkRow>(
+        `
+          insert into page_share_links (id, page_id, token, label, access_level, password_hash, expires_at, created_by)
+          values ($1, $2, $3, $4, $5, $6, $7, $8)
+          returning *
+        `,
+        [
+          randomUUID(),
+          id,
+          randomUUID().replaceAll("-", ""),
+          input.label?.trim() || "Share link",
+          input.accessLevel ?? "view",
+          passwordHash,
+          input.expiresAt ?? null,
+          actor
+        ]
+      );
+      await recordPageActivity(pageDb, id, "share.created", "Share link created", actor);
+      return toPageShareLink(result.rows[0]);
+    },
+
+    async revokeShareLink(id: string, shareLinkId: string, actor = "local-user") {
+      const result = await pageDb.query<PageShareLinkRow>(
+        `
+          update page_share_links
+          set revoked_at = now()
+          where id = $1 and page_id = $2 and revoked_at is null
+          returning *
+        `,
+        [shareLinkId, id]
+      );
+      const row = result.rows[0];
+      if (!row) {
+        return null;
+      }
+
+      await recordPageActivity(pageDb, id, "share.revoked", "Share link revoked", actor);
+      return toPageShareLink(row);
+    },
+
+    async updatePermissions(
+      id: string,
+      input: { visibility?: Page["visibility"]; owner?: string; permissionNote?: string | null; actor?: string }
+    ) {
+      const page = await this.get(id);
+      if (!page) {
+        return null;
+      }
+
+      const actor = input.actor ?? "local-user";
+      const visibility = input.visibility ?? page.visibility;
+      const owner = input.owner?.trim() || page.owner;
+      const permissionNote = input.permissionNote === undefined ? page.permissionNote : input.permissionNote?.trim() || null;
+      const result = await pageDb.query<PageRow>(
+        `
+          update pages
+          set visibility = $2,
+              owner = $3,
+              permission_note = $4,
+              updated_by = $5,
+              updated_at = now()
+          where id = $1
+          returning *
+        `,
+        [id, visibility, owner, permissionNote, actor]
+      );
+      await recordPageActivity(pageDb, id, "permissions.updated", "Permissions updated", actor, {
+        visibility,
+        owner
+      });
+      return toPage(result.rows[0]);
     },
 
     async listVersions(id: string) {
@@ -816,16 +1391,32 @@ export async function createPageStore(db?: CompanyBrainDb) {
       const prepared = prepareHtml(pageInput.html);
       const result = await pageDb.query<PageRow>(
         `
-          insert into pages (id, title, slug, html, plain_text, creator, created_by, updated_by, pinned_order, parent_page_id)
-          values ($1, $2, $3, $4, $5, $6, $6, $6, $7, $8)
+          insert into pages (
+            id, title, slug, html, plain_text, creator, created_by, updated_by,
+            pinned_order, parent_page_id, visibility, owner, permission_note
+          )
+          values ($1, $2, $3, $4, $5, $6, $6, $6, $7, $8, $9, $10, $11)
           returning *
         `,
-        [id, pageInput.title, slug, prepared.html, prepared.plainText, actor, input.pinnedOrder ?? null, input.parentPageId ?? null]
+        [
+          id,
+          pageInput.title,
+          slug,
+          prepared.html,
+          prepared.plainText,
+          actor,
+          input.pinnedOrder ?? null,
+          input.parentPageId ?? null,
+          input.visibility ?? "workspace",
+          input.owner?.trim() || actor,
+          input.permissionNote?.trim() || null
+        ]
       );
       const page = toPage(result.rows[0]);
       await writeLinks(pageDb, id, prepared.links);
       await reindexPageChunks(pageDb, id, page.title, page.html);
       await snapshotPage(pageDb, page, actor);
+      await recordPageActivity(pageDb, id, "page.created", `Created ${page.title}`, actor);
 
       return page;
     },
@@ -838,16 +1429,32 @@ export async function createPageStore(db?: CompanyBrainDb) {
       const prepared = prepareHtml(pageInput.html);
       const result = await pageDb.query<PageRow>(
         `
-          insert into pages (id, title, slug, html, plain_text, creator, created_by, updated_by, pinned_order, parent_page_id)
-          values ($1, $2, $3, $4, $5, $6, $6, $6, $7, $8)
+          insert into pages (
+            id, title, slug, html, plain_text, creator, created_by, updated_by,
+            pinned_order, parent_page_id, visibility, owner, permission_note
+          )
+          values ($1, $2, $3, $4, $5, $6, $6, $6, $7, $8, $9, $10, $11)
           returning *
         `,
-        [id, pageInput.title, slug, prepared.html, prepared.plainText, actor, input.pinnedOrder ?? null, input.parentPageId ?? null]
+        [
+          id,
+          pageInput.title,
+          slug,
+          prepared.html,
+          prepared.plainText,
+          actor,
+          input.pinnedOrder ?? null,
+          input.parentPageId ?? null,
+          input.visibility ?? "workspace",
+          input.owner?.trim() || actor,
+          input.permissionNote?.trim() || null
+        ]
       );
       const page = toPage(result.rows[0]);
       await writeLinks(pageDb, id, prepared.links);
       await reindexPageChunks(pageDb, id, page.title, page.html);
       await snapshotPage(pageDb, page, actor);
+      await recordPageActivity(pageDb, id, "page.created", `Created ${page.title}`, actor);
 
       return page;
     },
@@ -949,6 +1556,10 @@ export async function createPageStore(db?: CompanyBrainDb) {
       await writeLinks(pageDb, id, prepared.links);
       await reindexPageChunks(pageDb, id, page.title, page.html);
       await snapshotPage(pageDb, page, actor);
+      await recordPageActivity(pageDb, id, "page.updated", `Updated ${page.title}`, actor, {
+        previousTitle: current.title,
+        title: page.title
+      });
 
       return page;
     },
@@ -992,7 +1603,11 @@ export async function createPageStore(db?: CompanyBrainDb) {
         [id, parentId, input.actor ?? "local-user"]
       );
 
-      return toPage(result.rows[0]);
+      const page = toPage(result.rows[0]);
+      await recordPageActivity(pageDb, id, "page.moved", `Moved ${page.title}`, input.actor ?? "local-user", {
+        parentPageId: parentId
+      });
+      return page;
     },
 
     async duplicate(id: string, actor = "local-user") {
@@ -1004,7 +1619,11 @@ export async function createPageStore(db?: CompanyBrainDb) {
       return this.create({
         title: `${current.title} copy`,
         html: current.html,
-        actor
+        actor,
+        parentPageId: current.parentPageId,
+        visibility: current.visibility,
+        owner: current.owner,
+        permissionNote: current.permissionNote
       });
     },
 
@@ -1019,7 +1638,13 @@ export async function createPageStore(db?: CompanyBrainDb) {
         [id, actor, homePageSlug]
       );
       const row = result.rows[0];
-      return row ? toPage(row) : null;
+      if (!row) {
+        return null;
+      }
+
+      const page = toPage(row);
+      await recordPageActivity(pageDb, id, "page.deleted", `Deleted ${page.title}`, actor);
+      return page;
     }
   };
 }

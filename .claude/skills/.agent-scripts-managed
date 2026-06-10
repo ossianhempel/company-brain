@@ -15,11 +15,14 @@ convex-quickstart
 convex-schema-builder
 convex-setup-auth
 create-cli
+frontend-app-builder
+frontend-testing-debugging
 grill-with-docs
 hono
 mcp-builder
 privacy-policy
 shadcn
+stripe-best-practices
 tanstack-start-best-practices
 turborepo
 vercel-composition-patterns

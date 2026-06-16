@@ -231,6 +231,82 @@ test("a mutation with no file changes does not create an empty commit", async ()
   );
 });
 
+// --- U3: attribution + optimistic concurrency ------------------------------
+
+test("a mutation whose baseVersion matches HEAD commits", async () => {
+  await withWriter(async (writer, dir) => {
+    const first = await writer.enqueue({
+      paths: ["a.md"],
+      message: "v1",
+      actor,
+      write: () => writeFile(join(dir, "a.md"), "v1\n"),
+    });
+    const second = await writer.enqueue({
+      paths: ["a.md"],
+      message: "v2",
+      actor,
+      baseVersion: first.hash,
+      write: () => writeFile(join(dir, "a.md"), "v2\n"),
+    });
+    assert.notEqual(second.hash, first.hash);
+    assert.equal(second.changed, true);
+  });
+});
+
+test("a stale baseVersion throws WorkspaceConflictError and leaves HEAD unchanged", async () => {
+  await withWriter(async (writer, dir) => {
+    const first = await writer.enqueue({
+      paths: ["a.md"],
+      message: "v1",
+      actor,
+      write: () => writeFile(join(dir, "a.md"), "v1\n"),
+    });
+    await writer.enqueue({
+      paths: ["a.md"],
+      message: "v2",
+      actor,
+      write: () => writeFile(join(dir, "a.md"), "v2\n"),
+    });
+    const headBefore = await writer.headOid();
+
+    await assert.rejects(
+      () =>
+        writer.enqueue({
+          paths: ["a.md"],
+          message: "stale",
+          actor,
+          baseVersion: first.hash, // stale: HEAD has moved past v1
+          write: () => writeFile(join(dir, "a.md"), "v3\n"),
+        }),
+      WorkspaceConflictError
+    );
+    assert.equal(await writer.headOid(), headBefore);
+  });
+});
+
+test("human and agent actors produce distinct, well-formed commit authors", async () => {
+  await withWriter(async (writer, dir) => {
+    await writer.enqueue({
+      paths: ["a.md"],
+      message: "by human",
+      actor: { name: "Alice Smith" }, // no email -> derived local part
+      write: () => writeFile(join(dir, "a.md"), "a\n"),
+    });
+    await writer.enqueue({
+      paths: ["b.md"],
+      message: "by agent",
+      actor: { name: "Researcher", email: "agent@company-brain.local" },
+      write: () => writeFile(join(dir, "b.md"), "b\n"),
+    });
+
+    const log = await git.log({ fs, dir });
+    const byMessage = Object.fromEntries(log.map((c) => [c.commit.message.trim(), c.commit.author]));
+    assert.equal(byMessage["by human"].name, "Alice Smith");
+    assert.equal(byMessage["by human"].email, "alice-smith@company-brain.local");
+    assert.equal(byMessage["by agent"].email, "agent@company-brain.local");
+  });
+});
+
 // KTD1 validation spike: confirms the full isomorphic-git cycle Phase 0 relies
 // on (init -> commit -> amend-file -> commit -> log -> diff -> restore) works.
 // If this ever fails the bar, the package swaps to simple-git behind the same

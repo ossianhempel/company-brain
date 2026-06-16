@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import git from "isomorphic-git";
 
@@ -18,6 +19,44 @@ export interface GitWriterOptions {
   workspaceDir: string;
   /** Default branch name for a freshly-initialized repo. Defaults to "main". */
   defaultBranch?: string;
+  /**
+   * Called after a mutation produces a new commit (the reindex seam). Runs
+   * inside the serialized queue, so the index update cannot race the next
+   * mutation. Not called when a mutation results in no commit.
+   */
+  onCommit?: (info: CommitHookInfo) => Promise<void> | void;
+}
+
+export interface CommitHookInfo {
+  /** Repo-relative paths the mutation declared. */
+  paths: string[];
+  /** The new commit hash. */
+  hash: string;
+}
+
+/**
+ * A single serialized workspace mutation: declare the paths it touches, perform
+ * the file writes in `write()`, and the queue stages exactly those paths and
+ * commits them atomically with the actor's attribution.
+ */
+export interface WorkspaceMutation {
+  /** Explicit repo-relative paths this mutation creates, modifies, or deletes. */
+  paths: string[];
+  message: string;
+  actor: Actor;
+  /** Performs the file writes/deletes for the declared paths. */
+  write: () => Promise<void> | void;
+  /**
+   * Optimistic-concurrency guard: the commit hash the caller last saw. If it no
+   * longer matches HEAD for the touched paths, the mutation is rejected. (U3)
+   */
+  baseVersion?: string;
+}
+
+export interface MutationResult {
+  hash: string;
+  /** False when nothing changed (no new commit was created). */
+  changed: boolean;
 }
 
 export interface CommitInfo {
@@ -52,6 +91,23 @@ export class GitWriterError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "GitWriterError";
+  }
+}
+
+/**
+ * Thrown when a mutation's `baseVersion` no longer matches HEAD — another writer
+ * committed first. Callers map this to an HTTP 409 (optimistic concurrency).
+ */
+export class WorkspaceConflictError extends Error {
+  readonly baseVersion: string;
+  readonly currentVersion: string;
+  constructor(baseVersion: string, currentVersion: string) {
+    super(
+      `Stale write: baseVersion ${baseVersion.slice(0, 8)} no longer matches HEAD ${currentVersion.slice(0, 8)}.`
+    );
+    this.name = "WorkspaceConflictError";
+    this.baseVersion = baseVersion;
+    this.currentVersion = currentVersion;
   }
 }
 
@@ -215,10 +271,61 @@ export function createGitWriter(options: GitWriterOptions) {
     return { changed, clean: changed.length === 0 };
   }
 
+  /** Restore the declared paths to their state at `priorHead` (rollback). */
+  async function rollbackPaths(paths: string[], priorHead: string | null): Promise<void> {
+    for (const p of paths) {
+      const existedAtHead = priorHead ? (await readBlobAt(priorHead, p)) !== null : false;
+      if (existedAtHead && priorHead) {
+        await git.checkout({ fs, dir, ref: priorHead, filepaths: [p], force: true });
+      } else if (existsSync(join(dir, p))) {
+        await rm(join(dir, p), { force: true });
+      }
+    }
+  }
+
+  // Serialized single-writer queue: one mutation runs at a time so commits and
+  // the reindex hook never race. New mutations chain onto the tail promise.
+  let tail: Promise<unknown> = Promise.resolve();
+
+  async function runMutation(mutation: WorkspaceMutation): Promise<MutationResult> {
+    assertExplicitPaths(mutation.paths);
+    await ensureRepo();
+    const priorHead = await headOid();
+
+    if (mutation.baseVersion !== undefined && priorHead && mutation.baseVersion !== priorHead) {
+      throw new WorkspaceConflictError(mutation.baseVersion, priorHead);
+    }
+
+    try {
+      await mutation.write();
+      const hash = await stageAndCommit(mutation.paths, mutation.message, mutation.actor);
+      const changed = hash !== priorHead;
+      if (changed && options.onCommit) {
+        await options.onCommit({ paths: mutation.paths, hash });
+      }
+      return { hash, changed };
+    } catch (error) {
+      await rollbackPaths(mutation.paths, priorHead);
+      throw error;
+    }
+  }
+
+  /** Enqueue a mutation; resolves/rejects after it (and its hook) complete. */
+  function enqueue(mutation: WorkspaceMutation): Promise<MutationResult> {
+    const result = tail.then(
+      () => runMutation(mutation),
+      () => runMutation(mutation)
+    );
+    // Keep the chain alive even if this mutation rejects.
+    tail = result.catch(() => undefined);
+    return result;
+  }
+
   return {
     ensureRepo,
     isManaged,
     stageAndCommit,
+    enqueue,
     history,
     diff,
     restore,

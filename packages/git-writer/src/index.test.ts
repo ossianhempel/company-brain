@@ -6,14 +6,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import git from "isomorphic-git";
 import fs from "node:fs";
-import { createGitWriter, GitWriterError } from "./index.ts";
+import { createGitWriter, GitWriterError, WorkspaceConflictError } from "./index.ts";
+import type { CommitHookInfo } from "./index.ts";
 
 async function withWriter<T>(
-  run: (writer: ReturnType<typeof createGitWriter>, dir: string) => Promise<T>
+  run: (writer: ReturnType<typeof createGitWriter>, dir: string) => Promise<T>,
+  options?: { onCommit?: (info: CommitHookInfo) => void | Promise<void> }
 ) {
   const dir = await mkdtemp(join(tmpdir(), "company-brain-git-writer-test-"));
   try {
-    return await run(createGitWriter({ workspaceDir: dir }), dir);
+    return await run(createGitWriter({ workspaceDir: dir, onCommit: options?.onCommit }), dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -119,6 +121,114 @@ test("restore throws for a path absent at the commit", async () => {
     const h1 = await writer.stageAndCommit(["a.md"], "v1", actor);
     await assert.rejects(() => writer.restore(h1, "missing.md"), GitWriterError);
   });
+});
+
+// --- U2: serialized queue --------------------------------------------------
+
+test("enqueue serializes mutations in submission order", async () => {
+  await withWriter(async (writer, dir) => {
+    // Submit concurrently (no await between) — the queue must serialize them.
+    const p1 = writer.enqueue({
+      paths: ["a.md"],
+      message: "m1",
+      actor,
+      write: () => writeFile(join(dir, "a.md"), "a\n"),
+    });
+    const p2 = writer.enqueue({
+      paths: ["b.md"],
+      message: "m2",
+      actor,
+      write: () => writeFile(join(dir, "b.md"), "b\n"),
+    });
+    await Promise.all([p1, p2]);
+
+    const messages = (await git.log({ fs, dir })).map((c) => c.commit.message.trim());
+    assert.deepEqual(messages, ["m2", "m1"]); // newest first; m2 committed after m1
+  });
+});
+
+test("enqueue fires onCommit once per commit with paths and hash", async () => {
+  const seen: CommitHookInfo[] = [];
+  await withWriter(
+    async (writer, dir) => {
+      const { hash } = await writer.enqueue({
+        paths: ["a.md"],
+        message: "m1",
+        actor,
+        write: () => writeFile(join(dir, "a.md"), "a\n"),
+      });
+      assert.equal(seen.length, 1);
+      assert.deepEqual(seen[0].paths, ["a.md"]);
+      assert.equal(seen[0].hash, hash);
+    },
+    { onCommit: (info) => void seen.push(info) }
+  );
+});
+
+test("a failing mutation rolls back, leaves HEAD unchanged, and the queue survives", async () => {
+  const seen: CommitHookInfo[] = [];
+  await withWriter(
+    async (writer, dir) => {
+      await writer.enqueue({
+        paths: ["a.md"],
+        message: "seed",
+        actor,
+        write: () => writeFile(join(dir, "a.md"), "seed\n"),
+      });
+      const headBefore = await writer.headOid();
+
+      await assert.rejects(() =>
+        writer.enqueue({
+          paths: ["b.md"],
+          message: "boom",
+          actor,
+          write: async () => {
+            await writeFile(join(dir, "b.md"), "partial\n"); // partial write...
+            throw new Error("boom"); // ...then fail
+          },
+        })
+      );
+
+      assert.equal(await writer.headOid(), headBefore); // no new commit
+      assert.equal(existsSync(join(dir, "b.md")), false); // partial write rolled back
+      assert.equal((await writer.status()).clean, true);
+
+      // The queue still works after a failure.
+      const { hash } = await writer.enqueue({
+        paths: ["c.md"],
+        message: "after",
+        actor,
+        write: () => writeFile(join(dir, "c.md"), "c\n"),
+      });
+      assert.match(hash, /^[0-9a-f]{40}$/);
+      assert.equal(seen.filter((s) => s.paths.includes("b.md")).length, 0); // hook never fired for failed mutation
+    },
+    { onCommit: (info) => void seen.push(info) }
+  );
+});
+
+test("a mutation with no file changes does not create an empty commit", async () => {
+  const seen: CommitHookInfo[] = [];
+  await withWriter(
+    async (writer, dir) => {
+      const first = await writer.enqueue({
+        paths: ["a.md"],
+        message: "v1",
+        actor,
+        write: () => writeFile(join(dir, "a.md"), "v1\n"),
+      });
+      const noop = await writer.enqueue({
+        paths: ["a.md"],
+        message: "noop",
+        actor,
+        write: () => writeFile(join(dir, "a.md"), "v1\n"), // identical content
+      });
+      assert.equal(noop.changed, false);
+      assert.equal(noop.hash, first.hash);
+      assert.equal(seen.length, 1); // hook only fired for the real commit
+    },
+    { onCommit: (info) => void seen.push(info) }
+  );
 });
 
 // KTD1 validation spike: confirms the full isomorphic-git cycle Phase 0 relies

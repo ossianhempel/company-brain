@@ -361,6 +361,8 @@ export function createWorkspace(options: WorkspaceOptions) {
 
   /** All slugs on disk within an area whose files carry the given extension. */
   async function listRawIn(area: string, ext: string): Promise<string[]> {
+    assertSafeSegment(area, "area");
+    assertSafeSegment(ext, "extension");
     const base = join(root, area);
     if (!existsSync(base)) return [];
     const suffix = `.${ext}`;

@@ -253,3 +253,10 @@ test("raw helpers reject unsafe area / extension (not just slug)", async () => {
     assert.equal(await ws.readRawIn("jobs", "ok", "yaml"), "name: ok\n");
   });
 });
+
+test("listRawIn rejects an unsafe area/extension", async () => {
+  await withWorkspace(async (ws) => {
+    await assert.rejects(() => ws.listRawIn("..", "yaml"));
+    await assert.rejects(() => ws.listRawIn("jobs", "../x"));
+  });
+});

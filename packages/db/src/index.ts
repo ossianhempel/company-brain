@@ -471,6 +471,31 @@ async function migrateDb(db: CompanyBrainDb) {
     alter table pages add column if not exists content_hash text;
   `);
 
+  // Phase 2: entities (people/teams/projects/…) are git-canonical workspace
+  // files; this is their derived index. profile = compiled-truth (the file's
+  // Summary). memories gain entity_id so atomized facts link to their entity.
+  await applyMigration(db, 12, `
+    create table if not exists entities (
+      id text primary key,
+      slug text not null default '',
+      title text not null,
+      type text not null default 'topic',
+      profile text not null default '',
+      tags_json text not null default '[]',
+      content_hash text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+
+    create unique index if not exists entities_slug_idx on entities (slug);
+    create index if not exists entities_type_idx on entities (type);
+    create index if not exists entities_deleted_at_idx on entities (deleted_at);
+
+    alter table memories add column if not exists entity_id text references entities(id) on delete cascade;
+    create index if not exists memories_entity_id_idx on memories (entity_id);
+  `);
+
 }
 
 async function applyMigration(db: CompanyBrainDb, version: number, sql: string) {

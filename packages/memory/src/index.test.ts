@@ -151,3 +151,23 @@ test("saves and forgets active memories", async () => {
     assert.equal(afterForget.results.some((result) => result.sourceId === saved.id), false);
   });
 });
+
+// --- U3: migration 12 (entities + memories.entity_id) ----------------------
+
+test("migration 12: entities table and memories.entity_id are usable", async () => {
+  await withMemoryStore(async (_memory, db) => {
+    await db.query(
+      "insert into entities (id, slug, title, type, profile) values ($1,$2,$3,$4,$5)",
+      ["ent1", "ada", "Ada", "person", "Lead."]
+    );
+    await db.query(
+      "insert into memories (id, kind, content, entity_id) values ($1,$2,$3,$4)",
+      ["mem1", "fact", "Born 1815", "ent1"]
+    );
+    const ent = await db.query<{ slug: string; profile: string }>("select slug, profile from entities where id = $1", ["ent1"]);
+    assert.equal(ent.rows[0].slug, "ada");
+    assert.equal(ent.rows[0].profile, "Lead.");
+    const mem = await db.query<{ entity_id: string }>("select entity_id from memories where id = $1", ["mem1"]);
+    assert.equal(mem.rows[0].entity_id, "ent1");
+  });
+});

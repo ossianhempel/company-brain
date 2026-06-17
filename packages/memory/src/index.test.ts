@@ -413,3 +413,24 @@ test("U8: editing an entity file's Summary updates the profile via reindex", asy
     assert.equal(profile?.memories[0].id, saved.id);
   });
 });
+
+// --- code review: structured sources round-trip in file mode ---------------
+
+test("file mode: artifact + manual sources round-trip through reindex", async () => {
+  await withFileMemoryStore(async (memory) => {
+    const art = await memory.ingestArtifact({ sourceType: "chat", title: "Src", rawText: "ctx", actor: "a" });
+    const saved = await memory.saveMemory({
+      kind: "decision",
+      subject: "Storage",
+      content: "Decided.",
+      sources: [
+        { sourceType: "artifact", artifactId: art.id, pageId: null, pageChunkId: null, sourceChunkId: null, quote: "because X" },
+        { sourceType: "manual", pageId: null, pageChunkId: null, artifactId: null, sourceChunkId: null, quote: "note" },
+      ],
+    });
+    const got = await memory.getMemory(saved.id);
+    assert.equal(got?.sources.length, 2); // not silently dropped in file mode
+    assert.equal(got?.sources.some((s) => s.sourceType === "artifact" && s.artifactId === art.id && s.quote === "because X"), true);
+    assert.equal(got?.sources.some((s) => s.sourceType === "manual" && s.quote === "note"), true);
+  });
+});

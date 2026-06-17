@@ -456,22 +456,36 @@ export async function reindexEntities(
         `,
         [fact.id, fact.kind, fact.content, doc.title, fact.status, fact.confidence, doc.id]
       );
+      // Authoritative structured citations (artifact/manual/chunk/page + quotes),
+      // round-tripped from the fact. Page sources carry a stable page id, so they
+      // survive a page rename without slug re-resolution.
+      const coveredPageIds = new Set<string>();
+      for (const s of fact.sources) {
+        if (s.sourceType === "page" && s.pageId) coveredPageIds.add(s.pageId);
+        await db.query(
+          `
+            insert into memory_sources (id, memory_id, source_type, page_id, page_chunk_id, artifact_id, source_chunk_id, quote)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
+          `,
+          [randomUUID(), fact.id, s.sourceType, s.pageId ?? null, s.pageChunkId ?? null, s.artifactId ?? null, s.sourceChunkId ?? null, s.quote ?? null]
+        );
+      }
+      // Human-added [[slug]] page links not already covered by a structured
+      // source. Resolved by slug (caveat: a slug-only link won't re-resolve after
+      // the cited page is renamed — rename-reference rewrite is a follow-up).
       for (const citeSlug of fact.citations) {
-        // Citations resolve [[slug]] -> page id. The stored memory_sources.page_id
-        // is then rename-stable (page id is invariant). Caveat: if the cited page
-        // is renamed AND this entity file is later re-committed, the stale [[slug]]
-        // won't re-resolve — rename-reference rewriting across files is a follow-up
-        // (same deferral as the pages layer).
         const page = await db.query<{ id: string }>(
           "select id from pages where slug = $1 and deleted_at is null",
           [citeSlug]
         );
+        const pageId = page.rows[0]?.id ?? null;
+        if (pageId && coveredPageIds.has(pageId)) continue; // already represented
         await db.query(
           `
             insert into memory_sources (id, memory_id, source_type, page_id, quote)
             values ($1, $2, 'page', $3, null)
           `,
-          [randomUUID(), fact.id, page.rows[0]?.id ?? null]
+          [randomUUID(), fact.id, pageId]
         );
       }
     }
@@ -648,7 +662,9 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
         for (const ps of await pageSlugsFromSources(input.sources ?? [])) {
           if (!content.includes(`[[${ps}]]`)) content += ` [[${ps}]]`;
         }
-        const fact = newFact({ kind: input.kind, content, date, confidence: input.confidence });
+        // Carry the full structured sources on the fact so they round-trip
+        // through reindex (page links also show inline as [[slug]] above).
+        const fact = newFact({ kind: input.kind, content, date, confidence: input.confidence, sources: input.sources ?? [] });
         await gitWriter!.enqueue({
           paths: [ws.entityFilePath(slug)],
           message: `memory: ${slug}`,

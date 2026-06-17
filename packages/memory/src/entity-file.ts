@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { MemoryKind, MemoryStatus } from "./index.ts";
+import type { MemoryKind, MemorySource, MemoryStatus } from "./index.ts";
 import type { PageFrontmatter, StoredPage } from "@company-brain/workspace";
+
+/** A citation on a fact (full MemorySource minus the derived id/memoryId). */
+export type FactSource = Omit<MemorySource, "id" | "memoryId">;
 
 // ---------------------------------------------------------------------------
 // Entity file model — GBrain "compiled-truth + timeline"
@@ -26,6 +29,13 @@ export interface EntityFact {
   citations: string[]; // slugs extracted from [[...]]
   confidence: number;
   status: MemoryStatus;
+  /**
+   * Full structured citations (artifact/manual/chunk/page incl. quotes),
+   * round-tripped via the fact's machine comment so file-mode saveMemory keeps
+   * the complete source contract. [[slug]] in content is the human-visible
+   * page link; this is the authoritative provenance.
+   */
+  sources: FactSource[];
 }
 
 export interface EntityDoc {
@@ -37,9 +47,22 @@ export interface EntityDoc {
   facts: EntityFact[];
 }
 
-const FACT_META = /<!--\s*id:(\S+)\s+conf:([\d.]+)\s+status:(\w+)\s*-->\s*$/;
+const FACT_META = /<!--\s*id:(\S+)\s+conf:([\d.]+)\s+status:(\w+)(?:\s+src:(\S+))?\s*-->\s*$/;
 const CITATION = /\[\[([^\]]+)\]\]/g;
 const DEFAULT_TYPE: EntityType = "topic";
+
+function encodeSources(sources: FactSource[]): string {
+  return Buffer.from(JSON.stringify(sources), "utf8").toString("base64");
+}
+
+function decodeSources(encoded: string): FactSource[] {
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 /** Build a new fact with a stable id; defaults confidence 1, status active. */
 export function newFact(input: {
@@ -48,6 +71,7 @@ export function newFact(input: {
   date: string;
   confidence?: number;
   id?: string;
+  sources?: FactSource[];
 }): EntityFact {
   return {
     id: input.id ?? randomUUID(),
@@ -57,6 +81,7 @@ export function newFact(input: {
     citations: extractCitations(input.content),
     confidence: input.confidence ?? 1,
     status: "active",
+    sources: input.sources ?? [],
   };
 }
 
@@ -118,14 +143,16 @@ function parseFactLine(line: string, entityId: string): EntityFact | null {
   const content = parts.slice(2).join(" · ").trim();
   // Marker id wins; otherwise derive a stable, entity-namespaced id.
   const id = markerId ?? deterministicFactId(entityId, date, kind, content);
-  return { id, date, kind, content, citations: extractCitations(content), confidence, status };
+  const sources = meta && meta[4] ? decodeSources(meta[4]) : [];
+  return { id, date, kind, content, citations: extractCitations(content), confidence, status, sources };
 }
 
 function serializeFact(fact: EntityFact): string {
   // A timeline fact is a single list item; collapse newlines so multi-line
   // content can't split the item across lines (which the parser reads line-wise).
   const content = fact.content.replace(/\s*\n\s*/g, " ").trim();
-  return `- ${fact.date} · **${fact.kind}** · ${content} <!--id:${fact.id} conf:${fact.confidence} status:${fact.status}-->`;
+  const src = fact.sources.length ? ` src:${encodeSources(fact.sources)}` : "";
+  return `- ${fact.date} · **${fact.kind}** · ${content} <!--id:${fact.id} conf:${fact.confidence} status:${fact.status}${src}-->`;
 }
 
 /** Parse an entity file (frontmatter + body) into a structured doc. */

@@ -1322,10 +1322,6 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .taskBoardGrid {
-    grid-template-columns: 1fr;
-  }
-
   .previewPane {
     grid-template-columns: 1fr;
   }
@@ -1536,4 +1532,12 @@ textarea {
 }
 .sidebarSetupButton:hover {
   color: var(--color-default);
+}
+
+/* Phase 4: collapse the TASKS board on narrow widths. Placed after the base
+   .taskBoardGrid rule so it isn't shadowed by source order at equal specificity. */
+@media (max-width: 860px) {
+  .taskBoardGrid {
+    grid-template-columns: 1fr;
+  }
 }

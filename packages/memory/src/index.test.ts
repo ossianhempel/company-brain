@@ -455,3 +455,20 @@ test("recreating a deleted entity slug with a new id reindexes cleanly", async (
     assert.equal(live.rows[0].id, "ent-new");
   });
 });
+
+// --- code review: hash-last makes a partial reindex recoverable ------------
+
+test("a null content_hash forces a rebuild (recovery after a partial reindex)", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await writeEntityDoc(ws, "ada", baseDoc({ facts: [newFact({ kind: "fact", content: "A", date: "2026-06-17", id: "f1" })] }));
+    await reindexEntities(db, ws, ["ada"]);
+
+    // Simulate a partial failure state: children gone, hash cleared.
+    await db.query("update entities set content_hash = null where slug = $1", ["ada"]);
+    await db.query("delete from memories where entity_id = $1", ["ent-ada"]);
+
+    await reindexEntities(db, ws, ["ada"]); // null hash -> not skipped -> rebuilds
+    const mems = await db.query<{ n: string }>("select count(*) as n from memories where entity_id = $1", ["ent-ada"]);
+    assert.equal(Number(mems.rows[0].n), 1);
+  });
+});

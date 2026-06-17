@@ -441,21 +441,23 @@ export async function reindexEntities(
       [slug, doc.id]
     );
 
+    // content_hash is written LAST (after the children rebuild) so a crash mid-
+    // reindex leaves it null and the file is re-indexed next time, never skipped.
     await db.query(
       `
         insert into entities (id, slug, title, type, profile, tags_json, content_hash)
-        values ($1, $2, $3, $4, $5, $6, $7)
+        values ($1, $2, $3, $4, $5, $6, null)
         on conflict (id) do update set
           slug = excluded.slug,
           title = excluded.title,
           type = excluded.type,
           profile = excluded.profile,
           tags_json = excluded.tags_json,
-          content_hash = excluded.content_hash,
+          content_hash = null,
           updated_at = now(),
           deleted_at = null
       `,
-      [doc.id, slug, doc.title, doc.type, doc.profile, JSON.stringify(doc.tags), hash]
+      [doc.id, slug, doc.title, doc.type, doc.profile, JSON.stringify(doc.tags)]
     );
 
     // Re-atomize the entity's facts into the derived memories index.
@@ -501,6 +503,9 @@ export async function reindexEntities(
         );
       }
     }
+
+    // Children are rebuilt — now mark the hash so future reindexes can skip.
+    await db.query("update entities set content_hash = $2 where id = $1", [doc.id, hash]);
   }
 }
 

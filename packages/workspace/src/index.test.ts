@@ -154,3 +154,32 @@ test("deletePage removes the directory-index variant too", async () => {
     assert.equal(existsSync(join(dir, "pages", "dir", "index.md")), false);
   });
 });
+
+// --- U1: area-aware path helpers + memory area -----------------------------
+
+test("area helpers: entity paths, pathArea, and generic slugFromPath", async () => {
+  await withWorkspace(async (ws) => {
+    assert.equal(ws.entityFilePath("ada"), "memory/ada.md");
+    assert.equal(ws.pageFilePath("a/b"), "pages/a/b.md"); // pages unchanged
+    assert.equal(ws.pathArea("memory/ada.md"), "memory");
+    assert.equal(ws.pathArea("pages/a/b.md"), "pages");
+    assert.equal(ws.slugFromPath("memory/team/eng.md"), "team/eng");
+    assert.equal(ws.slugFromPath("pages/a/b.md"), "a/b");
+    assert.equal(ws.slugFromPath("pages/x/index.md"), "x");
+  });
+});
+
+test("memory area: writeEntity/readEntity round-trip and listEntitySlugs scope", async () => {
+  await withWorkspace(async (ws, dir) => {
+    await ws.writeEntity("ada", { frontmatter: { title: "Ada", type: "person" }, markdown: "# Ada\n\nLead.\n" }, NOW);
+    assert.equal(existsSync(join(dir, "memory", "ada.md")), true);
+
+    const read = await ws.readEntity("ada");
+    assert.ok(read);
+    assert.equal(read.frontmatter.title, "Ada");
+    assert.match(read.markdown, /Lead\./);
+
+    assert.deepEqual(await ws.listEntitySlugs(), ["ada"]);
+    assert.deepEqual(await ws.listPageSlugs(), []); // memory write does not leak into pages
+  });
+});

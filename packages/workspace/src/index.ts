@@ -61,6 +61,8 @@ export interface StoredPage {
 
 /** Subdirectory under the workspace where page files live. */
 const PAGES_DIR = "pages";
+/** Subdirectory under the workspace where entity/memory files live. */
+const MEMORY_DIR = "memory";
 
 // Sanitize allowlist mirrors packages/pages `prepareHtml` so the HTML boundary
 // is identical whether content arrives from the editor or is re-derived from a
@@ -104,22 +106,39 @@ export function createWorkspace(options: WorkspaceOptions) {
     replacement: (content) => `[[${content}]]`,
   });
 
+  // --- Area-aware path helpers ---------------------------------------------
+  // An "area" is a top-level workspace subtree (pages/, memory/, …). Page-named
+  // wrappers below keep their exact signatures so the pages layer is untouched.
+
+  function areaFilePath(area: string, slug: string): string {
+    return `${area}/${slug}.md`;
+  }
+  function areaIndexPath(area: string, slug: string): string {
+    return `${area}/${slug}/index.md`;
+  }
+
+  /** The top-level area a repo-relative path belongs to (e.g. "pages", "memory"). */
+  function pathArea(relPath: string): string {
+    return relPath.replace(/\\/g, "/").split("/")[0] ?? "";
+  }
+
+  /** A repo-relative file path back to its slug, within its area (any area). */
+  function slugFromPath(relPath: string): string {
+    const norm = relPath.replace(/\\/g, "/");
+    const withoutArea = norm.slice(norm.indexOf("/") + 1); // strip leading "<area>/"
+    return withoutArea.replace(/\/index\.md$/, "").replace(/\.md$/, "");
+  }
+
   /** Repo-relative file path for a page slug (slug may be nested, e.g. a/b/c). */
   function pageFilePath(slug: string): string {
-    return `${PAGES_DIR}/${slug}.md`;
+    return areaFilePath(PAGES_DIR, slug);
   }
-
-  /** Inverse of pageFilePath: a repo-relative page path back to its slug. */
-  function slugFromPath(relPath: string): string {
-    return relPath
-      .replace(/\\/g, "/")
-      .replace(new RegExp(`^${PAGES_DIR}/`), "")
-      .replace(/\/index\.md$/, "")
-      .replace(/\.md$/, "");
-  }
-
   function dirIndexPath(slug: string): string {
-    return `${PAGES_DIR}/${slug}/index.md`;
+    return areaIndexPath(PAGES_DIR, slug);
+  }
+  /** Repo-relative file path for an entity (memory-area) slug. */
+  function entityFilePath(slug: string): string {
+    return areaFilePath(MEMORY_DIR, slug);
   }
 
   /** Convert sanitized HTML to canonical markdown. */
@@ -153,11 +172,11 @@ export function createWorkspace(options: WorkspaceOptions) {
   }
 
   /**
-   * Read a page by slug. Resolves either a standalone `pages/<slug>.md` or a
-   * directory page `pages/<slug>/index.md`. Returns null if neither exists.
+   * Read a file by slug within an area. Resolves either `<area>/<slug>.md` or
+   * `<area>/<slug>/index.md`, backfilling+persisting a stable id if missing.
    */
-  async function readPage(slug: string): Promise<StoredPage | null> {
-    const candidates = [pageFilePath(slug), dirIndexPath(slug)];
+  async function readFileIn(area: string, slug: string): Promise<StoredPage | null> {
+    const candidates = [areaFilePath(area, slug), areaIndexPath(area, slug)];
     for (const rel of candidates) {
       const abs = join(root, rel);
       if (!existsSync(abs)) continue;
@@ -177,17 +196,18 @@ export function createWorkspace(options: WorkspaceOptions) {
   }
 
   /**
-   * Write a page file (frontmatter + markdown body), creating parent dirs.
-   * Stamps `updated` and guarantees a stable `id`. Returns the repo-relative
-   * path written (for explicit-path git staging).
+   * Write a file (frontmatter + markdown body) within an area, creating parent
+   * dirs. Stamps `updated` and guarantees a stable `id`. Returns the
+   * repo-relative path written (for explicit-path git staging).
    */
-  async function writePage(
+  async function writeFileIn(
+    area: string,
     slug: string,
     input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
     now: string,
     options: { exclusive?: boolean } = {}
   ): Promise<{ relPath: string; frontmatter: PageFrontmatter }> {
-    const relPath = pageFilePath(slug);
+    const relPath = areaFilePath(area, slug);
     const abs = join(root, relPath);
     await mkdir(dirname(abs), { recursive: true });
 
@@ -209,10 +229,10 @@ export function createWorkspace(options: WorkspaceOptions) {
     return { relPath, frontmatter };
   }
 
-  /** Remove a page file (both the standalone and directory-index variants). */
-  async function deletePage(slug: string): Promise<string[]> {
+  /** Remove a file within an area (both standalone and directory-index variants). */
+  async function deleteFileIn(area: string, slug: string): Promise<string[]> {
     const removed: string[] = [];
-    for (const rel of [pageFilePath(slug), dirIndexPath(slug)]) {
+    for (const rel of [areaFilePath(area, slug), areaIndexPath(area, slug)]) {
       const abs = join(root, rel);
       if (existsSync(abs)) {
         await rm(abs, { force: true });
@@ -222,9 +242,29 @@ export function createWorkspace(options: WorkspaceOptions) {
     return removed;
   }
 
-  /** All page slugs on disk (recursive walk of the pages dir). */
-  async function listPageSlugs(): Promise<string[]> {
-    const base = join(root, PAGES_DIR);
+  // Page-area wrappers (unchanged signatures).
+  const readPage = (slug: string) => readFileIn(PAGES_DIR, slug);
+  const writePage = (
+    slug: string,
+    input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
+    now: string,
+    options: { exclusive?: boolean } = {}
+  ) => writeFileIn(PAGES_DIR, slug, input, now, options);
+  const deletePage = (slug: string) => deleteFileIn(PAGES_DIR, slug);
+
+  // Entity (memory-area) wrappers.
+  const readEntity = (slug: string) => readFileIn(MEMORY_DIR, slug);
+  const writeEntity = (
+    slug: string,
+    input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
+    now: string,
+    options: { exclusive?: boolean } = {}
+  ) => writeFileIn(MEMORY_DIR, slug, input, now, options);
+  const deleteEntity = (slug: string) => deleteFileIn(MEMORY_DIR, slug);
+
+  /** All slugs on disk within an area (recursive walk). */
+  async function listSlugsIn(area: string): Promise<string[]> {
+    const base = join(root, area);
     if (!existsSync(base)) return [];
     const slugs: string[] = [];
     const walk = async (absDir: string): Promise<void> => {
@@ -243,18 +283,29 @@ export function createWorkspace(options: WorkspaceOptions) {
     return slugs;
   }
 
+  const listPageSlugs = () => listSlugsIn(PAGES_DIR);
+  const listEntitySlugs = () => listSlugsIn(MEMORY_DIR);
+
   return {
-    pageFilePath,
-    dirIndexPath,
+    pathArea,
     slugFromPath,
     htmlToMarkdown,
     markdownToHtml,
     sanitizePageHtml,
     parsePage,
+    // pages area
+    pageFilePath,
+    dirIndexPath,
     readPage,
     writePage,
     deletePage,
     listPageSlugs,
+    // memory (entity) area
+    entityFilePath,
+    readEntity,
+    writeEntity,
+    deleteEntity,
+    listEntitySlugs,
   };
 }
 

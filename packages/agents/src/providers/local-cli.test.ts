@@ -74,3 +74,25 @@ test("model override is passed into the spawned args", async () => {
   assert.equal(seen.includes("--model"), true);
   assert.equal(seen.includes("opus-x"), true);
 });
+
+test("prompt + system prompt are sent via stdin, never argv (no ps/proc leak)", async () => {
+  let seenArgs: string[] = [];
+  let seenInput: string | undefined;
+  const r: CommandRunner = {
+    async which() {
+      return "/bin/claude";
+    },
+    async exec(_cmd, args, opts) {
+      if (!args.includes("--version")) {
+        seenArgs = args;
+        seenInput = opts?.input;
+      }
+      return { code: 0, stdout: "ok", stderr: "", timedOut: false };
+    },
+  };
+  const p = claudeLocalProvider(r);
+  await p.run({ systemPrompt: "SECRET-PERSONA", prompt: "SECRET-TASK" });
+  assert.equal(seenArgs.some((a) => a.includes("SECRET")), false); // nothing sensitive in argv
+  assert.match(seenInput ?? "", /SECRET-PERSONA/);
+  assert.match(seenInput ?? "", /SECRET-TASK/);
+});

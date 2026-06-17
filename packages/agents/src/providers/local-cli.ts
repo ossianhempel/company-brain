@@ -95,39 +95,38 @@ export function createLocalCliProvider(config: LocalCliConfig, runner: CommandRu
   };
 }
 
-/** Claude Code headless provider (best-effort default flags). */
+/**
+ * Combine persona (system prompt) + task (user prompt) into a single stdin
+ * payload. Prompt text is fed via stdin — never argv — so private company
+ * knowledge isn't exposed in `ps`/`/proc`/crash logs on shared hosts.
+ */
+function combinePrompts(input: RunInput): string {
+  const system = input.systemPrompt.trim();
+  const user = input.prompt.trim();
+  return system ? `${system}\n\n---\n\n${user}` : user;
+}
+
+/** Claude Code headless provider (best-effort default flags; prompt via stdin). */
 export function claudeLocalProvider(runner?: CommandRunner): Provider {
   return createLocalCliProvider(
     {
       id: "claude_local",
       candidates: ["claude", "claude-code"],
-      buildArgs: (input) => [
-        "-p",
-        input.prompt,
-        "--append-system-prompt",
-        input.systemPrompt,
-        "--output-format",
-        "json",
-        ...(input.model ? ["--model", input.model] : []),
-      ],
+      buildArgs: (input) => ["-p", "--output-format", "json", ...(input.model ? ["--model", input.model] : [])],
+      buildInput: combinePrompts,
     },
     runner
   );
 }
 
-/** Codex CLI headless provider (best-effort default flags). */
+/** Codex CLI headless provider (best-effort default flags; prompt via stdin). */
 export function codexLocalProvider(runner?: CommandRunner): Provider {
   return createLocalCliProvider(
     {
       id: "codex_local",
       candidates: ["codex"],
-      buildArgs: (input) => [
-        "exec",
-        "--json",
-        ...(input.model ? ["--model", input.model] : []),
-        input.prompt,
-      ],
-      buildInput: (input) => input.systemPrompt,
+      buildArgs: (input) => ["exec", "--json", ...(input.model ? ["--model", input.model] : [])],
+      buildInput: combinePrompts,
     },
     runner
   );

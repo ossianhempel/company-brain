@@ -133,3 +133,16 @@ test("an overlapping fire while a prior run is in-flight is skipped", async () =
   await flush();
   assert.equal(h.scheduler.runningCount(), 0);
 });
+
+test("an agent with an invalid cron schedule is skipped, not crashed", async () => {
+  const agent: Agent = { id: "a", slug: "bad", name: "Bad", provider: null, model: null, enabled: true, schedule: "not-a-cron", tags: [] };
+  const h = harness([], [agent]);
+  await h.scheduler.start(); // must not throw
+  assert.equal(h.active().length, 0);
+});
+
+test("a job with an invalid cron schedule is skipped, not crashed", async () => {
+  const h = harness([job({ schedule: "bogus" })]);
+  await h.scheduler.start(); // must not throw
+  assert.equal(h.active().length, 0);
+});

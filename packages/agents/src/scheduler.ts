@@ -46,6 +46,21 @@ export function createScheduler(deps: SchedulerDeps) {
   const running = new Set<string>();
   let reloadChain: Promise<void> = Promise.resolve();
 
+  // Schedule defensively: a hand-authored agent/job with an invalid cron must
+  // not crash the (awaited) scheduler start — skip + warn instead of throwing.
+  function safeSchedule(expr: string, fn: () => void, label: string): CronTask | null {
+    if (!cron.validate(expr)) {
+      console.warn(`[scheduler] skipping ${label}: invalid cron schedule "${expr}"`);
+      return null;
+    }
+    try {
+      return scheduleCron(expr, fn);
+    } catch (err) {
+      console.warn(`[scheduler] failed to schedule ${label}: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
   function fire(key: string, run: () => Promise<unknown>, deregister?: () => void): void {
     if (deregister) deregister(); // oneShot: stop before running so it never re-fires
     if (running.has(key)) return; // overlap guard
@@ -64,23 +79,25 @@ export function createScheduler(deps: SchedulerDeps) {
 
     const jobs = (await deps.store.listJobs()).filter((j) => j.enabled);
     for (const job of jobs) {
-      let task: CronTask;
+      let task: CronTask | null = null;
       const fn = () =>
         fire(
           `job:${job.slug}`,
           () => deps.runAgent({ agentSlug: job.agent, prompt: job.prompt, jobSlug: job.slug, providerOverride: job.provider ?? undefined }),
           job.oneShot ? () => task?.stop() : undefined
         );
-      task = scheduleCron(job.schedule, fn);
-      tasks.push(task);
+      task = safeSchedule(job.schedule, fn, `job:${job.slug}`);
+      if (task) tasks.push(task);
     }
 
     const agents = (await deps.store.listAgents()).filter((a) => a.enabled && a.schedule);
     for (const agent of agents) {
-      const task = scheduleCron(agent.schedule!, () =>
-        fire(`agent:${agent.slug}`, () => deps.runAgent({ agentSlug: agent.slug, prompt: HEARTBEAT_PROMPT, providerOverride: agent.provider ?? undefined }))
+      const task = safeSchedule(
+        agent.schedule!,
+        () => fire(`agent:${agent.slug}`, () => deps.runAgent({ agentSlug: agent.slug, prompt: HEARTBEAT_PROMPT, providerOverride: agent.provider ?? undefined })),
+        `agent:${agent.slug}`
       );
-      tasks.push(task);
+      if (task) tasks.push(task);
     }
   }
 

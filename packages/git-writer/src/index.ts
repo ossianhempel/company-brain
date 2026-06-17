@@ -118,6 +118,9 @@ export class WorkspaceConflictError extends Error {
 export function createGitWriter(options: GitWriterOptions) {
   const dir = options.workspaceDir;
   const defaultBranch = options.defaultBranch ?? "main";
+  // The post-commit hook can be set at construction or bound later (e.g. once
+  // the page store can supply the reindex function). It runs inside the queue.
+  let commitHook = options.onCommit;
 
   async function isRepo(): Promise<boolean> {
     return existsSync(join(dir, ".git"));
@@ -319,8 +322,8 @@ export function createGitWriter(options: GitWriterOptions) {
       await mutation.write();
       const hash = await stageAndCommit(mutation.paths, mutation.message, mutation.actor);
       const changed = hash !== priorHead;
-      if (changed && options.onCommit) {
-        await options.onCommit({ paths: mutation.paths, hash });
+      if (changed && commitHook) {
+        await commitHook({ paths: mutation.paths, hash });
       }
       return { hash, changed };
     } catch (error) {
@@ -340,11 +343,17 @@ export function createGitWriter(options: GitWriterOptions) {
     return result;
   }
 
+  /** Bind (or replace) the in-queue post-commit hook after construction. */
+  function setOnCommit(hook: GitWriterOptions["onCommit"]): void {
+    commitHook = hook;
+  }
+
   return {
     ensureRepo,
     isManaged,
     stageAndCommit,
     enqueue,
+    setOnCommit,
     history,
     diff,
     commitMeta,

@@ -500,6 +500,32 @@ test("file mode (U8): parentPageId and attribution survive a full reindex", asyn
   });
 });
 
+test("file mode: startup does not overwrite an edited home.md", async () => {
+  const wsDir = await mkdtemp(join(tmpdir(), "company-brain-home-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "company-brain-home-db-"));
+  const db = await createDb(dbDir);
+  try {
+    const ws = createWorkspace({ workspaceDir: wsDir });
+    const gw = createGitWriter({ workspaceDir: wsDir });
+    const store1 = await createPageStore(db, { gitWriter: gw, workspace: ws });
+    const home = await store1.getBySlug("home");
+    assert.ok(home);
+    await store1.update(home.id, { html: "<h1>Home</h1><p>CUSTOM HOME CONTENT</p>", actor: "alice" });
+
+    // A second store construction (simulating a restart) must not clobber it.
+    const store2 = await createPageStore(db, {
+      gitWriter: createGitWriter({ workspaceDir: wsDir }),
+      workspace: createWorkspace({ workspaceDir: wsDir }),
+    });
+    const reread = await store2.getBySlug("home");
+    assert.match(reread!.html, /CUSTOM HOME CONTENT/);
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+});
+
 test("file mode: version history follows a title rename", async () => {
   await withFilePageStore(async (pages) => {
     const page = await pages.create({ title: "Original Title", html: "<h1>Original Title</h1><p>v1</p>", actor: "a" });

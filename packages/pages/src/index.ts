@@ -992,6 +992,15 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
   const workspace = opts?.workspace;
   const fileMode = Boolean(gitWriter && workspace);
 
+  // Derive the DB index inside the git writer's serialized commit hook, so the
+  // index update is atomic with the commit (never races a concurrent mutation).
+  if (fileMode) {
+    gitWriter!.setOnCommit(async ({ paths }) => {
+      const slugs = [...new Set(paths.map((p) => workspace!.slugFromPath(p)))];
+      await reindexPages(pageDb, workspace!, slugs);
+    });
+  }
+
   /**
    * In file mode, write+commit the page's markdown file (the canonical record).
    * Frontmatter carries every persisted field so the DB index is fully
@@ -1045,8 +1054,9 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
    * DB never leads the canonical files.
    */
   async function persistPageFileMode(page: Page, actor: string, oldSlug?: string): Promise<Page> {
+    // writePageFile commits, and the git writer's commit hook reindexes inside
+    // the same serialized mutation, so the DB is current once this resolves.
     await writePageFile(page, actor, oldSlug);
-    await reindexPages(pageDb, workspace!, [page.slug]);
     return (await getBySlug(page.slug)) ?? page;
   }
 
@@ -1089,22 +1099,51 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     return toPage(result.rows[0]);
   }
 
-  const homePage = await ensureHomePage();
-  const existingHomeChunks = await pageDb.query<{ id: string }>("select id from page_chunks where page_id = $1 limit 1", [
-    homePage.id
-  ]);
-  if (existingHomeChunks.rows.length === 0) {
-    await reindexPageChunks(pageDb, homePage.id, homePage.title, homePage.html);
-  }
-  const existingHomeVersions = await pageDb.query<{ id: string }>(
-    "select id from page_versions where page_id = $1 limit 1",
-    [homePage.id]
-  );
-  if (existingHomeVersions.rows.length === 0) {
-    await snapshotPage(pageDb, homePage, homePage.updatedBy);
-  }
   if (fileMode) {
-    await writePageFile(homePage, "system");
+    // Files are canonical: never write the DB's home page over an existing
+    // home.md. If the file exists, index it; otherwise seed a default home file.
+    const existingHome = await workspace!.readPage(homePageSlug);
+    if (existingHome) {
+      await reindexPages(pageDb, workspace!, [homePageSlug]);
+    } else {
+      const now = new Date().toISOString();
+      const prepared = prepareHtml(homePageHtml);
+      const home: Page = {
+        id: randomUUID(),
+        title: homePageTitle,
+        slug: homePageSlug,
+        html: prepared.html,
+        plainText: prepared.plainText,
+        creator: "system",
+        createdBy: "system",
+        updatedBy: "system",
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+        pinnedOrder: 0,
+        parentPageId: null,
+        visibility: "workspace",
+        owner: "system",
+        permissionNote: null,
+      };
+      await writePageFile(home, "system"); // commit hook indexes it
+    }
+  } else {
+    const homePage = await ensureHomePage();
+    const existingHomeChunks = await pageDb.query<{ id: string }>(
+      "select id from page_chunks where page_id = $1 limit 1",
+      [homePage.id]
+    );
+    if (existingHomeChunks.rows.length === 0) {
+      await reindexPageChunks(pageDb, homePage.id, homePage.title, homePage.html);
+    }
+    const existingHomeVersions = await pageDb.query<{ id: string }>(
+      "select id from page_versions where page_id = $1 limit 1",
+      [homePage.id]
+    );
+    if (existingHomeVersions.rows.length === 0) {
+      await snapshotPage(pageDb, homePage, homePage.updatedBy);
+    }
   }
 
   return {
@@ -1986,8 +2025,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
         if (!current || current.slug === homePageSlug) {
           return null;
         }
-        await deletePageFile(current.slug, actor);
-        await reindexPages(pageDb, workspace!, [current.slug]); // file gone -> tombstone
+        await deletePageFile(current.slug, actor); // commit hook reindexes -> tombstone
         await recordPageActivity(pageDb, id, "page.deleted", `Deleted ${current.title}`, actor);
         return { ...current, deletedAt: new Date().toISOString() };
       }

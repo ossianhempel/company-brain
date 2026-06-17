@@ -109,6 +109,15 @@ export function createWorkspace(options: WorkspaceOptions) {
     return `${PAGES_DIR}/${slug}.md`;
   }
 
+  /** Inverse of pageFilePath: a repo-relative page path back to its slug. */
+  function slugFromPath(relPath: string): string {
+    return relPath
+      .replace(/\\/g, "/")
+      .replace(new RegExp(`^${PAGES_DIR}/`), "")
+      .replace(/\/index\.md$/, "")
+      .replace(/\.md$/, "");
+  }
+
   function dirIndexPath(slug: string): string {
     return `${PAGES_DIR}/${slug}/index.md`;
   }
@@ -220,6 +229,7 @@ export function createWorkspace(options: WorkspaceOptions) {
 
   return {
     pageFilePath,
+    slugFromPath,
     htmlToMarkdown,
     markdownToHtml,
     sanitizePageHtml,

@@ -156,6 +156,12 @@ importers:
       '@company-brain/db':
         specifier: workspace:*
         version: link:../db
+      '@company-brain/git-writer':
+        specifier: workspace:*
+        version: link:../git-writer
+      '@company-brain/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       sanitize-html:
         specifier: ^2.17.4
         version: 2.17.4

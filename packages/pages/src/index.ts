@@ -1,9 +1,17 @@
-import { randomBytes, randomUUID, scrypt as scryptCallback } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from "node:crypto";
 import { promisify } from "node:util";
 import sanitizeHtml from "sanitize-html";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import type { GitWriter } from "@company-brain/git-writer";
+import type { Workspace } from "@company-brain/workspace";
 
 const scrypt = promisify(scryptCallback);
+
+/** Options enabling file-canonical mode: writes go to markdown files + git. */
+export interface PageStoreOptions {
+  gitWriter?: GitWriter;
+  workspace?: Workspace;
+}
 
 export type Page = {
   id: string;
@@ -862,8 +870,140 @@ async function reindexPageChunks(db: CompanyBrainDb, pageId: string, title: stri
   }
 }
 
-export async function createPageStore(db?: CompanyBrainDb) {
+/**
+ * Rebuild the derived index row(s) for the given page slugs from their markdown
+ * files. A missing file becomes a soft-delete (tombstone), so history stays
+ * citable while the index reflects the working tree. Incremental: a file whose
+ * content_hash is unchanged is skipped.
+ */
+export async function reindexPages(
+  db: CompanyBrainDb,
+  workspace: Workspace,
+  slugs: string[]
+): Promise<void> {
+  for (const slug of slugs) {
+    const stored = await workspace.readPage(slug);
+    if (!stored) {
+      await db.query(
+        "update pages set deleted_at = now() where slug = $1 and deleted_at is null",
+        [slug]
+      );
+      continue;
+    }
+
+    const fm = stored.frontmatter;
+    const hash = createHash("sha256").update(stored.markdown).digest("hex");
+    const existing = await db.query<{ content_hash: string | null }>(
+      "select content_hash from pages where id = $1 and deleted_at is null",
+      [fm.id]
+    );
+    if (existing.rows[0]?.content_hash === hash) {
+      continue; // unchanged
+    }
+
+    const prepared = prepareHtml(workspace.markdownToHtml(stored.markdown));
+    const owner = fm.owner ?? "system";
+    await db.query(
+      `
+        insert into pages (
+          id, title, slug, html, plain_text, creator, created_by, updated_by,
+          created_at, updated_at, visibility, owner, content_hash
+        )
+        values ($1, $2, $3, $4, $5, $6, $6, $6, $7, $8, $9, $6, $10)
+        on conflict (id) do update set
+          title = excluded.title,
+          slug = excluded.slug,
+          html = excluded.html,
+          plain_text = excluded.plain_text,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at,
+          visibility = excluded.visibility,
+          content_hash = excluded.content_hash,
+          deleted_at = null
+      `,
+      [
+        fm.id,
+        fm.title,
+        slug,
+        prepared.html,
+        prepared.plainText,
+        owner,
+        fm.created ?? new Date().toISOString(),
+        fm.updated ?? new Date().toISOString(),
+        fm.visibility ?? "workspace",
+        hash,
+      ]
+    );
+    await writeLinks(db, fm.id, prepared.links);
+    await reindexPageChunks(db, fm.id, fm.title, prepared.html);
+  }
+}
+
+/** Rebuild the entire derived index from every page file on disk. */
+export async function reindexAllPages(db: CompanyBrainDb, workspace: Workspace): Promise<void> {
+  const slugs = await workspace.listPageSlugs();
+  await reindexPages(db, workspace, slugs);
+
+  // Tombstone any live index row whose file no longer exists on disk.
+  const onDisk = new Set(slugs);
+  const live = await db.query<{ slug: string }>(
+    "select slug from pages where deleted_at is null"
+  );
+  for (const { slug } of live.rows) {
+    if (!onDisk.has(slug)) {
+      await db.query("update pages set deleted_at = now() where slug = $1 and deleted_at is null", [
+        slug,
+      ]);
+    }
+  }
+}
+
+export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptions) {
   const pageDb = db ?? (await createDb());
+  const gitWriter = opts?.gitWriter;
+  const workspace = opts?.workspace;
+  const fileMode = Boolean(gitWriter && workspace);
+
+  /** In file mode, write the page's markdown file and commit it (single writer). */
+  async function writePageFile(page: Page, actor: string, oldSlug?: string): Promise<void> {
+    if (!fileMode) return;
+    const ws = workspace!;
+    const markdown = ws.htmlToMarkdown(page.html);
+    const frontmatter = {
+      id: page.id,
+      title: page.title,
+      created: page.createdAt,
+      updated: page.updatedAt,
+      visibility: page.visibility,
+      owner: page.owner,
+    };
+    const paths = [ws.pageFilePath(page.slug)];
+    const renamed = oldSlug && oldSlug !== page.slug ? oldSlug : undefined;
+    if (renamed) paths.push(ws.pageFilePath(renamed));
+    await gitWriter!.enqueue({
+      paths,
+      message: `${actor}: save ${page.slug}`,
+      actor: { name: actor },
+      write: async () => {
+        await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt);
+        if (renamed) await ws.deletePage(renamed);
+      },
+    });
+  }
+
+  /** In file mode, remove the page's markdown file and commit the deletion. */
+  async function deletePageFile(slug: string, actor: string): Promise<void> {
+    if (!fileMode) return;
+    const ws = workspace!;
+    await gitWriter!.enqueue({
+      paths: [ws.pageFilePath(slug)],
+      message: `${actor}: delete ${slug}`,
+      actor: { name: actor },
+      write: async () => {
+        await ws.deletePage(slug);
+      },
+    });
+  }
 
   async function getBySlug(slug: string) {
     const result = await pageDb.query<PageRow>("select * from pages where slug = $1 and deleted_at is null", [slug]);
@@ -903,6 +1043,9 @@ export async function createPageStore(db?: CompanyBrainDb) {
   );
   if (existingHomeVersions.rows.length === 0) {
     await snapshotPage(pageDb, homePage, homePage.updatedBy);
+  }
+  if (fileMode) {
+    await writePageFile(homePage, "system");
   }
 
   return {
@@ -1417,6 +1560,7 @@ export async function createPageStore(db?: CompanyBrainDb) {
       await reindexPageChunks(pageDb, id, page.title, page.html);
       await snapshotPage(pageDb, page, actor);
       await recordPageActivity(pageDb, id, "page.created", `Created ${page.title}`, actor);
+      await writePageFile(page, actor);
 
       return page;
     },
@@ -1455,6 +1599,7 @@ export async function createPageStore(db?: CompanyBrainDb) {
       await reindexPageChunks(pageDb, id, page.title, page.html);
       await snapshotPage(pageDb, page, actor);
       await recordPageActivity(pageDb, id, "page.created", `Created ${page.title}`, actor);
+      await writePageFile(page, actor);
 
       return page;
     },
@@ -1560,6 +1705,7 @@ export async function createPageStore(db?: CompanyBrainDb) {
         previousTitle: current.title,
         title: page.title
       });
+      await writePageFile(page, actor, current.slug);
 
       return page;
     },
@@ -1644,6 +1790,7 @@ export async function createPageStore(db?: CompanyBrainDb) {
 
       const page = toPage(row);
       await recordPageActivity(pageDb, id, "page.deleted", `Deleted ${page.title}`, actor);
+      await deletePageFile(page.slug, actor);
       return page;
     }
   };

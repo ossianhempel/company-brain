@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@company-brain/db": "workspace:*",
+    "@company-brain/git-writer": "workspace:*",
+    "@company-brain/workspace": "workspace:*",
     "sanitize-html": "^2.17.4"
   },
   "devDependencies": {

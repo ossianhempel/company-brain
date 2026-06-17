@@ -465,6 +465,12 @@ async function migrateDb(db: CompanyBrainDb) {
     update pages set visibility = 'restricted' where visibility = 'private';
   `);
 
+  // Files+git become canonical; pages is a derived index. content_hash lets
+  // reindex skip unchanged files on an incremental pass.
+  await applyMigration(db, 11, `
+    alter table pages add column if not exists content_hash text;
+  `);
+
 }
 
 async function applyMigration(db: CompanyBrainDb, version: number, sql: string) {

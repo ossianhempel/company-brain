@@ -5,6 +5,9 @@ import { randomUUID } from "node:crypto";
 import matter from "gray-matter";
 import MarkdownIt from "markdown-it";
 import TurndownService from "turndown";
+// turndown-plugin-gfm ships no type declarations; the suppression travels with
+// this module into any consuming program (e.g. @company-brain/pages).
+// @ts-expect-error untyped module
 import { gfm } from "turndown-plugin-gfm";
 import sanitizeHtml from "sanitize-html";
 

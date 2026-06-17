@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import {
   createNodeCommandRunner,
   detectCli,
@@ -27,6 +28,8 @@ export interface LocalCliConfig {
   /** Parse CLI stdout into turns + usage. Defaults to {@link defaultParseOutput}. */
   parseOutput?: (stdout: string) => { turns: ProviderTurn[]; usage?: Record<string, unknown> };
   defaultTimeoutMs?: number;
+  /** Working dir for the spawned CLI. Defaults to a neutral scratch dir (os tmp). */
+  cwd?: string;
 }
 
 /**
@@ -86,6 +89,7 @@ export function createLocalCliProvider(config: LocalCliConfig, runner: CommandRu
       const res = await runner.exec(detection.path, config.buildArgs(input), {
         input: config.buildInput ? config.buildInput(input) : undefined,
         timeoutMs: input.timeoutMs ?? config.defaultTimeoutMs ?? 120_000,
+        cwd: config.cwd ?? tmpdir(), // not the workspace — bound blast radius
       });
       if (res.timedOut) return { status: "failed", turns: [], error: "run timed out" };
       if (res.code !== 0) return { status: "failed", turns: [], error: res.stderr.trim() || `exit ${res.code}` };

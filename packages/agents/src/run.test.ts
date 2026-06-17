@@ -6,10 +6,15 @@ import test from "node:test";
 import { createDb } from "@company-brain/db";
 import { createWorkspace } from "@company-brain/workspace";
 import { createGitWriter } from "@company-brain/git-writer";
-import { createAgentStore, createProviderRegistry, type Provider, type RunInput } from "./index.ts";
+import { createAgentStore, createProviderRegistry, newAgent, buildAgentFile, type Provider, type RunInput } from "./index.ts";
 
 async function withRun<T>(
-  run: (store: Awaited<ReturnType<typeof createAgentStore>>, registry: ReturnType<typeof createProviderRegistry>) => Promise<T>
+  run: (
+    store: Awaited<ReturnType<typeof createAgentStore>>,
+    registry: ReturnType<typeof createProviderRegistry>,
+    ws: ReturnType<typeof createWorkspace>,
+    gw: ReturnType<typeof createGitWriter>
+  ) => Promise<T>
 ) {
   const wsDir = await mkdtemp(join(tmpdir(), "cb-run-ws-"));
   const dbDir = await mkdtemp(join(tmpdir(), "cb-run-db-"));
@@ -19,7 +24,7 @@ async function withRun<T>(
   const registry = createProviderRegistry();
   try {
     const store = await createAgentStore(db, { gitWriter: gw, workspace: ws, providers: registry });
-    return await run(store, registry);
+    return await run(store, registry, ws, gw);
   } finally {
     await db.close();
     await rm(wsDir, { recursive: true, force: true });
@@ -150,5 +155,34 @@ test("listConversations tolerates a non-finite limit (no SQL break)", async () =
     await store.runAgent({ agentSlug: "scribe", prompt: "go", providerOverride: "fake" });
     const list = await store.listConversations({ limit: Number("abc") }); // NaN
     assert.equal(list.length >= 1, true); // falls back to default, doesn't throw
+  });
+});
+
+test("a disabled agent does not run (records a failed transcript)", async () => {
+  await withRun(async (store, registry, ws, gw) => {
+    let ran = false;
+    registry.register({
+      id: "fake",
+      detect: async () => ({ available: true }),
+      run: async () => {
+        ran = true;
+        return { status: "done", turns: [] };
+      },
+    });
+    // Write an explicitly-disabled agent file through the writer -> reindex.
+    const file = buildAgentFile(newAgent({ id: "ag-off", name: "Paused", systemPrompt: "x", provider: "fake", enabled: false }));
+    await gw.enqueue({
+      paths: [ws.agentFilePath("paused")],
+      message: "agent: paused",
+      actor: { name: "t" },
+      write: async () => {
+        await ws.writeAgent("paused", { frontmatter: file.frontmatter, markdown: file.markdown }, "2026-06-18T00:00:00.000Z");
+      },
+    });
+
+    const conv = await store.runAgent({ agentSlug: "paused", prompt: "go", providerOverride: "fake" });
+    assert.equal(conv?.status, "failed");
+    assert.match(conv?.error ?? "", /disabled/);
+    assert.equal(ran, false); // provider never invoked for a disabled agent
   });
 });

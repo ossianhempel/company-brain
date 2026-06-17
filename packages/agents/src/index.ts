@@ -480,7 +480,11 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       const startedAt = new Date().toISOString();
 
       let result: RunResult;
-      if (!providerId) {
+      if (!agent.enabled) {
+        // A disabled agent must not run via any path (job, API, CLI) — record a
+        // failed transcript so the refusal is auditable.
+        result = { status: "failed", turns: [], error: `Agent "${input.agentSlug}" is disabled.` };
+      } else if (!providerId) {
         result = { status: "failed", turns: [], error: `No provider configured for agent "${input.agentSlug}".` };
       } else {
         const provider = providers.get(providerId);

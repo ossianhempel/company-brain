@@ -54,7 +54,7 @@ export interface ExecResult {
 export interface CommandRunner {
   /** Resolve a command name to an absolute executable path, or null if absent. */
   which(command: string): Promise<string | null>;
-  exec(command: string, args: string[], opts?: { input?: string; timeoutMs?: number }): Promise<ExecResult>;
+  exec(command: string, args: string[], opts?: { input?: string; timeoutMs?: number; cwd?: string }): Promise<ExecResult>;
 }
 
 /** Extra dirs to search beyond PATH — homebrew, the node bin, and nvm. */
@@ -96,7 +96,12 @@ export function createNodeCommandRunner(): CommandRunner {
     },
     exec(command, args, opts = {}) {
       return new Promise<ExecResult>((resolve) => {
-        const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+        // cwd defaults to a neutral scratch dir (not the workspace), so an agent
+        // CLI's relative-path writes don't land in the canonical git tree. This
+        // bounds blast radius; it is NOT a sandbox — local-CLI execution runs with
+        // the server's permissions and absolute writes remain possible (an
+        // accepted property of the operator-controlled local-CLI provider).
+        const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], cwd: opts.cwd });
         let stdout = "";
         let stderr = "";
         let timedOut = false;

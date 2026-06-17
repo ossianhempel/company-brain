@@ -96,3 +96,19 @@ test("prompt + system prompt are sent via stdin, never argv (no ps/proc leak)", 
   assert.match(seenInput ?? "", /SECRET-PERSONA/);
   assert.match(seenInput ?? "", /SECRET-TASK/);
 });
+
+test("spawns the CLI in a scratch cwd, not the workspace", async () => {
+  let seenCwd: string | undefined;
+  const r: CommandRunner = {
+    async which() {
+      return "/bin/claude";
+    },
+    async exec(_cmd, args, opts) {
+      if (!args.includes("--version")) seenCwd = opts?.cwd;
+      return { code: 0, stdout: "ok", stderr: "", timedOut: false };
+    },
+  };
+  await claudeLocalProvider(r).run({ systemPrompt: "s", prompt: "p" });
+  assert.equal(typeof seenCwd, "string");
+  assert.notEqual(seenCwd, process.cwd()); // not the server/workspace cwd
+});

@@ -477,10 +477,15 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         if (!provider) {
           result = { status: "failed", turns: [], error: `Unknown provider "${providerId}".` };
         } else {
-          // A provider that throws unexpectedly must still be recorded as a failed
-          // transcript (the audit/recovery contract), never escape this call.
+          // detect() is the availability boundary — gate here so an unavailable
+          // provider is recorded as a failed transcript without invoking run().
+          // A run() that still throws is caught (audit contract: every attempt is
+          // persisted, never escapes this call).
           try {
-            result = await provider.run({ systemPrompt, prompt: input.prompt, model: agent.model ?? undefined, timeoutMs: input.timeoutMs });
+            const detection = await provider.detect();
+            result = detection.available
+              ? await provider.run({ systemPrompt, prompt: input.prompt, model: agent.model ?? undefined, timeoutMs: input.timeoutMs })
+              : { status: "failed", turns: [], error: detection.error ?? `Provider "${providerId}" is unavailable.` };
           } catch (err) {
             result = { status: "failed", turns: [], error: err instanceof Error ? err.message : String(err) };
           }

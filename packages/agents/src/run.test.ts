@@ -123,3 +123,22 @@ test("a provider that throws is recorded as a failed transcript (not escaped)", 
     assert.match(conv?.error ?? "", /provider exploded/);
   });
 });
+
+test("an unavailable provider (detect=false) is recorded as failed without running", async () => {
+  await withRun(async (store, registry) => {
+    let ran = false;
+    registry.register({
+      id: "down",
+      detect: async () => ({ available: false, error: "cli not installed" }),
+      run: async () => {
+        ran = true;
+        return { status: "done", turns: [] };
+      },
+    });
+    await store.saveAgentFile("scribe", "x");
+    const conv = await store.runAgent({ agentSlug: "scribe", prompt: "go", providerOverride: "down" });
+    assert.equal(conv?.status, "failed");
+    assert.match(conv?.error ?? "", /cli not installed/);
+    assert.equal(ran, false); // run() not invoked for an unavailable provider
+  });
+});

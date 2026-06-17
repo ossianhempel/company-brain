@@ -127,3 +127,18 @@ test("agentAreasCommitHook routes a multi-area commit to the right reindexers", 
     assert.equal(Number(j.rows[0].n), 1);
   });
 });
+
+test("an agent file written without an explicit id gets a stable id (no reindex churn)", async () => {
+  await withIndex(async (db, ws) => {
+    // No id in frontmatter — ensureId fills + persists it at write time.
+    await ws.writeAgent("scribe", { frontmatter: { title: "Scribe" }, markdown: "You are scribe." }, NOW);
+    await reindexAgents(db, ws, ["scribe"]);
+    const first = await db.query<{ id: string }>("select id from agents where slug = $1 and deleted_at is null", ["scribe"]);
+    assert.equal(first.rows.length, 1);
+
+    await reindexAgents(db, ws, ["scribe"]); // unchanged file
+    const again = await db.query<{ id: string }>("select id from agents where slug = $1 and deleted_at is null", ["scribe"]);
+    assert.equal(again.rows.length, 1); // no duplicate/tombstone churn
+    assert.equal(again.rows[0].id, first.rows[0].id); // identity is stable
+  });
+});

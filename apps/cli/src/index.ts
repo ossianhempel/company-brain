@@ -11,11 +11,13 @@ import {
 } from "@company-brain/memory";
 import {
   createPageStore,
+  reindexAllPages,
   type Page,
   type PageSearchResult,
   type PageVersion,
   type PageWithRelations
 } from "@company-brain/pages";
+import { createWorkspace } from "@company-brain/workspace";
 
 type Flags = Record<string, string | boolean>;
 
@@ -410,6 +412,25 @@ async function main() {
 
   if (command === "migrate") {
     await handleMigrateCommand(subcommand, rest);
+    return;
+  }
+
+  if (command === "reindex") {
+    const { flags } = parseFlags([subcommand, ...rest].filter(Boolean));
+    const useApi = !flags.direct && (await canUseApi());
+    if (useApi) {
+      await requestApi("/api/admin/reindex", { method: "POST" });
+      printJson({ ok: true, mode: "api" });
+      return;
+    }
+    const db = await createDb();
+    const workspaceDir = process.env.COMPANY_BRAIN_WORKSPACE_DIR
+      ? path.resolve(process.cwd(), process.env.COMPANY_BRAIN_WORKSPACE_DIR)
+      : path.resolve(process.env.INIT_CWD ?? process.cwd(), "data/workspace");
+    const workspace = createWorkspace({ workspaceDir });
+    await reindexAllPages(db, workspace);
+    await db.close();
+    printJson({ ok: true, mode: "direct" });
     return;
   }
 

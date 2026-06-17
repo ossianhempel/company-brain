@@ -10,7 +10,8 @@
   "dependencies": {
     "@company-brain/db": "workspace:*",
     "@company-brain/memory": "workspace:*",
-    "@company-brain/pages": "workspace:*"
+    "@company-brain/pages": "workspace:*",
+    "@company-brain/workspace": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.19.4",

@@ -26,6 +26,9 @@ importers:
       '@company-brain/pages':
         specifier: workspace:*
         version: link:../../packages/pages
+      '@company-brain/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
     devDependencies:
       tsx:
         specifier: ^4.19.4
@@ -55,12 +58,18 @@ importers:
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@company-brain/git-writer':
+        specifier: workspace:*
+        version: link:../../packages/git-writer
       '@company-brain/memory':
         specifier: workspace:*
         version: link:../../packages/memory
       '@company-brain/pages':
         specifier: workspace:*
         version: link:../../packages/pages
+      '@company-brain/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
       '@hono/node-server':
         specifier: ^1.14.4
         version: 1.19.14(hono@4.12.23)

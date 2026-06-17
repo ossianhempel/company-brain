@@ -982,7 +982,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     if (renamed) paths.push(ws.pageFilePath(renamed));
     await gitWriter!.enqueue({
       paths,
-      message: `${actor}: save ${page.slug}`,
+      message: `save ${page.slug}`,
       actor: { name: actor },
       write: async () => {
         await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt);
@@ -997,7 +997,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     const ws = workspace!;
     await gitWriter!.enqueue({
       paths: [ws.pageFilePath(slug)],
-      message: `${actor}: delete ${slug}`,
+      message: `delete ${slug}`,
       actor: { name: actor },
       write: async () => {
         await ws.deletePage(slug);

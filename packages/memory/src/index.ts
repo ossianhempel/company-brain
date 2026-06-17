@@ -429,6 +429,18 @@ export async function reindexEntities(
     );
     if (existing.rows[0]?.content_hash === hash) continue; // unchanged
 
+    // A slug maps to one live entity (one file). If a different live row holds
+    // this slug (e.g. the file was recreated with a new id), tombstone it and
+    // drop its memories first, so the live-only unique slug index won't collide.
+    await db.query(
+      "delete from memories where entity_id in (select id from entities where slug = $1 and id <> $2 and deleted_at is null)",
+      [slug, doc.id]
+    );
+    await db.query(
+      "update entities set deleted_at = now() where slug = $1 and id <> $2 and deleted_at is null",
+      [slug, doc.id]
+    );
+
     await db.query(
       `
         insert into entities (id, slug, title, type, profile, tags_json, content_hash)

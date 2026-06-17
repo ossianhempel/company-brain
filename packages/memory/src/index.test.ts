@@ -434,3 +434,24 @@ test("file mode: artifact + manual sources round-trip through reindex", async ()
     assert.equal(got?.sources.some((s) => s.sourceType === "manual" && s.quote === "note"), true);
   });
 });
+
+// --- code review: delete/recreate an entity slug with a new id -------------
+
+test("recreating a deleted entity slug with a new id reindexes cleanly", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await writeEntityDoc(ws, "ada", baseDoc({ id: "ent-old", facts: [newFact({ kind: "fact", content: "A", date: "2026-06-17", id: "fo" })] }));
+    await reindexEntities(db, ws, ["ada"]);
+
+    // Delete the file, then full-reindex tombstones the old row.
+    await ws.deleteEntity("ada");
+    await reindexAllEntities(db, ws);
+
+    // Recreate the same slug with a NEW frontmatter id.
+    await writeEntityDoc(ws, "ada", baseDoc({ id: "ent-new", facts: [newFact({ kind: "fact", content: "B", date: "2026-06-17", id: "fn" })] }));
+    await reindexEntities(db, ws, ["ada"]); // must not throw on the unique slug index
+
+    const live = await db.query<{ id: string }>("select id from entities where slug = $1 and deleted_at is null", ["ada"]);
+    assert.equal(live.rows.length, 1);
+    assert.equal(live.rows[0].id, "ent-new");
+  });
+});

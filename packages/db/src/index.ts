@@ -488,7 +488,9 @@ async function migrateDb(db: CompanyBrainDb) {
       deleted_at timestamptz
     );
 
-    create unique index if not exists entities_slug_idx on entities (slug);
+    -- Unique among LIVE rows only, so a tombstoned entity doesn't block
+    -- recreating the same slug with a new id (delete/recreate flow).
+    create unique index if not exists entities_slug_live_idx on entities (slug) where deleted_at is null;
     create index if not exists entities_type_idx on entities (type);
     create index if not exists entities_deleted_at_idx on entities (deleted_at);
 

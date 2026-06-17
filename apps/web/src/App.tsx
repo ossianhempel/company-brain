@@ -717,6 +717,13 @@ export function App() {
     );
   }
 
+  // The DATA section (pages editor + memory). Leaving TEAM/TASKS returns here.
+  function backToData() {
+    setMemoryViewOpen(false);
+    setTeamViewOpen(false);
+    setTasksViewOpen(false);
+  }
+
   async function openMemoryView() {
     setMemoryViewOpen(true);
     setTeamViewOpen(false);
@@ -1312,19 +1319,45 @@ export function App() {
           )}
         </div>
 
-        <button className="primaryButton" type="button" onClick={openMemoryView}>
-          <Icon name="spark" size={14} />
-          Memory
-        </button>
-        <button className="primaryButton" type="button" onClick={openTeamView}>
-          <Icon name="spark" size={14} />
-          Team
-        </button>
-        <button className="primaryButton" type="button" onClick={openTasksView}>
-          <Icon name="spark" size={14} />
-          Tasks
-        </button>
+        <nav className="sectionNav" aria-label="Sections">
+          <button
+            className={!teamViewOpen && !tasksViewOpen ? "sectionNavButton active" : "sectionNavButton"}
+            type="button"
+            onClick={backToData}
+          >
+            <Icon name="doc" size={14} />
+            Data
+          </button>
+          <button
+            className={teamViewOpen ? "sectionNavButton active" : "sectionNavButton"}
+            type="button"
+            onClick={openTeamView}
+          >
+            <Icon name="spark" size={14} />
+            Team
+          </button>
+          <button
+            className={tasksViewOpen ? "sectionNavButton active" : "sectionNavButton"}
+            type="button"
+            onClick={openTasksView}
+          >
+            <Icon name="spark" size={14} />
+            Tasks
+          </button>
+        </nav>
 
+        {!teamViewOpen && !tasksViewOpen && (
+          <button
+            className={memoryViewOpen ? "primaryButton active" : "primaryButton"}
+            type="button"
+            onClick={memoryViewOpen ? backToData : openMemoryView}
+          >
+            <Icon name="spark" size={14} />
+            {memoryViewOpen ? "Back to pages" : "Memory"}
+          </button>
+        )}
+
+        {!teamViewOpen && !tasksViewOpen && (
         <nav className="pageList" aria-label="Pages">
           <div
             className={[
@@ -1456,6 +1489,7 @@ export function App() {
             </div>
           ))}
         </nav>
+        )}
       </aside>
 
       <section className="workspace">

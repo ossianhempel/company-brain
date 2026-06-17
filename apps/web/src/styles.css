@@ -1362,3 +1362,37 @@ textarea {
     border-bottom: 1px solid var(--color-border);
   }
 }
+
+/* Phase 4: DATA/TEAM/TASKS section nav */
+.sectionNav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.sectionNavButton {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-default);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.sectionNavButton:hover {
+  background: var(--color-selected);
+}
+.sectionNavButton.active {
+  color: var(--color-strong);
+  background: var(--color-selected);
+  border-color: var(--color-subtle);
+}
+.primaryButton.active {
+  color: var(--color-strong);
+  background: var(--color-selected);
+}

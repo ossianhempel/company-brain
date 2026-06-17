@@ -1396,3 +1396,82 @@ textarea {
   color: var(--color-strong);
   background: var(--color-selected);
 }
+
+/* Phase 4: TASKS board */
+.taskBoardGrid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+.taskBoard {
+  overflow: auto;
+}
+.laneContainer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.lane {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.laneHeader {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+.laneCount {
+  color: var(--color-default);
+}
+.laneEmpty {
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+.laneCard {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.laneCard.active {
+  border-color: var(--color-subtle);
+  background: var(--color-selected);
+}
+.laneCardOpen {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.laneCardOpen small {
+  color: var(--color-subtle);
+}
+.laneCardActions {
+  display: flex;
+  gap: 6px;
+}
+.laneCardActions button {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  cursor: pointer;
+}
+.laneCardActions button:hover {
+  background: var(--color-selected);
+}

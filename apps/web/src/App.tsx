@@ -471,6 +471,7 @@ export function App() {
   const [agentRunError, setAgentRunError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
+  const [boardError, setBoardError] = useState<string | null>(null);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [recallQuery, setRecallQuery] = useState("");
@@ -795,6 +796,49 @@ export function App() {
     if (!response.ok) return;
     const data = (await response.json()) as { conversation: ConversationDetail };
     setSelectedConversation(data.conversation);
+  }
+
+  async function archiveConversationUi(id: string) {
+    setBoardError(null);
+    const response = await fetch(`/api/conversations/${encodeURIComponent(id)}/archive`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: "web" })
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      setBoardError(body.error ?? `Archive failed (${response.status})`);
+      return;
+    }
+    if (selectedConversation?.id === id) setSelectedConversation(null);
+    await loadConversations();
+  }
+
+  async function rerunConversation(conv: ConversationSummary) {
+    setBoardError(null);
+    // Re-run with the original prompt (the first user turn of the transcript).
+    const detailRes = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}`);
+    if (!detailRes.ok) {
+      setBoardError("Could not load the original prompt.");
+      return;
+    }
+    const detail = (await detailRes.json()) as { conversation: ConversationDetail };
+    const prompt = detail.conversation.turns.find((t) => t.role === "user")?.content ?? "";
+    if (!prompt) {
+      setBoardError("No prompt found to re-run.");
+      return;
+    }
+    const runRes = await fetch(`/api/agents/${encodeURIComponent(conv.agent)}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, actor: "web" })
+    });
+    if (!runRes.ok) {
+      const body = (await runRes.json().catch(() => ({}))) as { error?: string };
+      setBoardError(body.error ?? `Re-run failed (${runRes.status})`);
+      return;
+    }
+    await loadConversations();
   }
 
   async function loadEntities() {
@@ -1590,41 +1634,51 @@ export function App() {
                 <Icon name="doc" size={15} />
               </button>
             </header>
-            <div className="memoryGrid">
-              <aside className="memoryPanel">
-                <div className="panelHeader">
-                  <h2>Lanes</h2>
-                  <button type="button" onClick={loadConversations}>
-                    Refresh
-                  </button>
-                </div>
-                {TASK_LANES.map((lane) => {
-                  const laneConversations = conversations.filter((c) => c.status === lane.key);
-                  if (laneConversations.length === 0) return null;
-                  return (
-                    <div className="memoryList" key={lane.key}>
-                      <h3>
-                        {lane.label} ({laneConversations.length})
-                      </h3>
-                      {laneConversations.map((conv) => (
-                        <button
-                          className={conv.id === selectedConversation?.id ? "memoryItem active" : "memoryItem"}
-                          key={conv.id}
-                          type="button"
-                          onClick={() => openConversation(conv.id)}
-                        >
-                          <span>{conv.agent}</span>
-                          <small>
-                            {conv.provider ?? "none"}
-                            {conv.job ? ` · job:${conv.job}` : ""}
-                          </small>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
-                {conversations.length === 0 && <p>No conversations yet. Run an agent from Team.</p>}
-              </aside>
+            {boardError && <p className="runError">{boardError}</p>}
+            <div className="taskBoardGrid">
+              <div className="taskBoard" role="list">
+                {conversations.length === 0 ? (
+                  <p className="laneEmpty">No conversations yet. Run an agent from Team.</p>
+                ) : (
+                  <div className="laneContainer">
+                    {TASK_LANES.map((lane) => {
+                      const laneConversations = conversations.filter((c) => c.status === lane.key);
+                      return (
+                        <div className="lane" key={lane.key}>
+                          <h3 className="laneHeader">
+                            {lane.label} <span className="laneCount">{laneConversations.length}</span>
+                          </h3>
+                          {laneConversations.map((conv) => (
+                            <div
+                              className={conv.id === selectedConversation?.id ? "laneCard active" : "laneCard"}
+                              key={conv.id}
+                            >
+                              <button className="laneCardOpen" type="button" onClick={() => openConversation(conv.id)}>
+                                <strong>{conv.agent}</strong>
+                                <small>
+                                  {conv.provider ?? "none"}
+                                  {conv.job ? ` · ${conv.job}` : ""}
+                                </small>
+                              </button>
+                              <div className="laneCardActions">
+                                <button type="button" onClick={() => rerunConversation(conv)}>
+                                  Re-run
+                                </button>
+                                {conv.status !== "archived" && (
+                                  <button type="button" onClick={() => archiveConversationUi(conv.id)}>
+                                    Archive
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                          {laneConversations.length === 0 && <p className="laneEmpty">—</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               {selectedConversation && (
                 <aside className="memoryPanel">
                   <div className="memoryDetail">
@@ -1635,6 +1689,9 @@ export function App() {
                         </strong>
                         <small>{selectedConversation.startedAt ?? ""}</small>
                       </div>
+                      <button type="button" onClick={() => setSelectedConversation(null)}>
+                        Close
+                      </button>
                     </div>
                     {selectedConversation.error && <p>Error: {selectedConversation.error}</p>}
                     {selectedConversation.turns.map((turn, index) => (

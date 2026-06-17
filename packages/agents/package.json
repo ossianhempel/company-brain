@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test --test-concurrency=1 src/agent-file.test.ts src/job-file.test.ts src/conversation-file.test.ts src/reindex.test.ts src/provider.test.ts src/store.test.ts src/index.test.ts"
+    "test": "tsx --test --test-concurrency=1 src/agent-file.test.ts src/job-file.test.ts src/conversation-file.test.ts src/reindex.test.ts src/provider.test.ts src/providers/local-cli.test.ts src/store.test.ts src/index.test.ts"
   },
   "dependencies": {
     "@company-brain/db": "workspace:*",

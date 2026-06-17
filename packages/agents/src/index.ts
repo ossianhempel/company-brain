@@ -436,3 +436,4 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
     },
   };
 }
+export * from "./providers/local-cli.ts";

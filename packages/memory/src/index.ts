@@ -547,6 +547,24 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
     return row ? { ...toMemory(row), sources: await sourcesForMemory(row.id) } : null;
   }
 
+  async function loadProfile(slug: string): Promise<EntityProfile | null> {
+    const result = await memoryDb.query<EntityRow>(
+      "select * from entities where slug = $1 and deleted_at is null",
+      [slug]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const mems = await memoryDb.query<MemoryRow>(
+      "select * from memories where entity_id = $1 and status = 'active' order by updated_at desc",
+      [row.id]
+    );
+    const memories: MemoryWithSources[] = [];
+    for (const m of mems.rows) {
+      memories.push({ ...toMemory(m), sources: await sourcesForMemory(m.id) });
+    }
+    return { entity: toEntity(row), memories };
+  }
+
   /** Page slugs to embed as [[wiki-links]] from page-typed sources (file mode). */
   async function pageSlugsFromSources(
     sources: Array<Omit<MemorySource, "id" | "memoryId">>
@@ -885,21 +903,36 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
     },
 
     async getProfile(slug: string): Promise<EntityProfile | null> {
-      const result = await memoryDb.query<EntityRow>(
-        "select * from entities where slug = $1 and deleted_at is null",
-        [slug]
-      );
-      const row = result.rows[0];
-      if (!row) return null;
-      const mems = await memoryDb.query<MemoryRow>(
-        "select * from memories where entity_id = $1 and status = 'active' order by updated_at desc",
-        [row.id]
-      );
-      const memories: MemoryWithSources[] = [];
-      for (const m of mems.rows) {
-        memories.push({ ...toMemory(m), sources: await sourcesForMemory(m.id) });
-      }
-      return { entity: toEntity(row), memories };
+      return loadProfile(slug);
+    },
+
+    /** The raw entity file (markdown body) for editing in the workspace UI. */
+    async getEntityFile(slug: string): Promise<{ slug: string; title: string; markdown: string } | null> {
+      if (!fileMode) return null;
+      const stored = await workspace!.readEntity(slug);
+      if (!stored) return null;
+      return { slug, title: stored.frontmatter.title, markdown: stored.markdown };
+    },
+
+    /**
+     * Save a raw human edit of an entity file through the single writer; the
+     * commit hook reindexes it (so a Summary edit updates the profile). The same
+     * commit→reindex path agents use — one shared workspace.
+     */
+    async saveEntityFile(slug: string, markdown: string, actor = "local-user"): Promise<EntityProfile | null> {
+      if (!fileMode) throw new Error("Editing entity files requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      await gitWriter!.enqueue({
+        paths: [ws.entityFilePath(slug)],
+        message: `memory: edit ${slug}`,
+        actor: { name: actor },
+        write: async () => {
+          const cur = await ws.readEntity(slug);
+          const frontmatter = cur?.frontmatter ?? { id: randomUUID(), title: slug, type: "topic", tags: [] };
+          await ws.writeEntity(slug, { frontmatter, markdown }, new Date().toISOString());
+        },
+      });
+      return loadProfile(slug);
     }
   };
 }

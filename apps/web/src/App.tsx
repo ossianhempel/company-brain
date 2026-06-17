@@ -130,6 +130,15 @@ type MemoryRecord = {
   sources: MemorySource[];
 };
 
+type EntitySummary = {
+  id: string;
+  slug: string;
+  title: string;
+  type: string;
+  profile: string;
+  tags: string[];
+};
+
 type RecallResult = {
   type: "memory" | "page_chunk" | "source_chunk";
   id: string;
@@ -425,6 +434,10 @@ export function App() {
   const [memoryKind, setMemoryKind] = useState<MemoryRecord["kind"]>("fact");
   const [memorySubject, setMemorySubject] = useState("");
   const [memoryContent, setMemoryContent] = useState("");
+  const [entities, setEntities] = useState<EntitySummary[]>([]);
+  const [selectedEntitySlug, setSelectedEntitySlug] = useState<string | null>(null);
+  const [entityMarkdown, setEntityMarkdown] = useState("");
+  const [entitySaveState, setEntitySaveState] = useState<"saved" | "dirty" | "saving">("saved");
   const [projectFormOpen, setProjectFormOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [pagePanelTab, setPagePanelTab] = useState<PagePanelTab>("related");
@@ -661,6 +674,37 @@ export function App() {
     setMemoryViewOpen(true);
     setHistoryOpen(false);
     await loadMemories();
+    await loadEntities();
+  }
+
+  async function loadEntities() {
+    const response = await fetch("/api/entities");
+    const data = (await response.json()) as { entities: EntitySummary[] };
+    setEntities(data.entities);
+  }
+
+  async function openEntity(slug: string) {
+    setSelectedEntitySlug(slug);
+    const response = await fetch(`/api/entities/${encodeURIComponent(slug)}/file`);
+    if (!response.ok) {
+      setEntityMarkdown("");
+      return;
+    }
+    const data = (await response.json()) as { markdown: string };
+    setEntityMarkdown(data.markdown);
+    setEntitySaveState("saved");
+  }
+
+  async function saveEntityFile() {
+    if (!selectedEntitySlug) return;
+    setEntitySaveState("saving");
+    await fetch(`/api/entities/${encodeURIComponent(selectedEntitySlug)}/file`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown: entityMarkdown, actor: "web" })
+    });
+    setEntitySaveState("saved");
+    await loadEntities();
   }
 
   async function runRecall(searchQuery = recallQuery) {
@@ -1481,6 +1525,55 @@ export function App() {
                     ) : (
                       <p>No sources attached yet.</p>
                     )}
+                  </div>
+                )}
+              </aside>
+
+              <aside className="memoryPanel">
+                <div className="panelHeader">
+                  <h2>Entities</h2>
+                  <button type="button" onClick={loadEntities}>
+                    Refresh
+                  </button>
+                </div>
+                <div className="memoryList">
+                  {entities.length ? (
+                    entities.map((entity) => (
+                      <button
+                        className={entity.slug === selectedEntitySlug ? "memoryItem active" : "memoryItem"}
+                        key={entity.id}
+                        type="button"
+                        onClick={() => openEntity(entity.slug)}
+                      >
+                        <span>{entity.title}</span>
+                        <small>{entity.type}{entity.profile ? ` · ${entity.profile}` : ""}</small>
+                      </button>
+                    ))
+                  ) : (
+                    <p>No entities yet. Save a memory with a subject to create one.</p>
+                  )}
+                </div>
+
+                {selectedEntitySlug && (
+                  <div className="memoryDetail">
+                    <div className="memoryDetailHeader">
+                      <div>
+                        <strong>{selectedEntitySlug}</strong>
+                        <small>editing the entity file · {entitySaveState}</small>
+                      </div>
+                      <button type="button" onClick={saveEntityFile} disabled={entitySaveState !== "dirty"}>
+                        Save
+                      </button>
+                    </div>
+                    <textarea
+                      className="entityEditor"
+                      value={entityMarkdown}
+                      rows={16}
+                      onChange={(event) => {
+                        setEntityMarkdown(event.target.value);
+                        setEntitySaveState("dirty");
+                      }}
+                    />
                   </div>
                 )}
               </aside>

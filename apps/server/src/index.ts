@@ -208,6 +208,22 @@ app.get("/api/entities/:slug", async (c) => {
   return c.json(profile);
 });
 
+app.get("/api/entities/:slug/file", async (c) => {
+  const file = await memory.getEntityFile(c.req.param("slug"));
+  if (!file) {
+    return c.json({ error: "Entity file not found" }, 404);
+  }
+  return c.json(file);
+});
+
+app.put("/api/entities/:slug/file", async (c) => {
+  const body = z
+    .object({ markdown: z.string(), actor: z.string().min(1).optional() })
+    .parse(await c.req.json());
+  const profile = await memory.saveEntityFile(c.req.param("slug"), body.markdown, body.actor);
+  return c.json(profile);
+});
+
 app.post("/api/memories/:id/forget", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
   const savedMemory = await memory.forgetMemory(c.req.param("id"), body.actor);

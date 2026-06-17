@@ -392,3 +392,24 @@ test("U7: memory page citation survives a page rename (id stable)", async () => 
     await rm(dbDir, { recursive: true, force: true });
   }
 });
+
+// --- U8: editing an entity file flows through the writer -> reindex ---------
+
+test("U8: editing an entity file's Summary updates the profile via reindex", async () => {
+  await withFileMemoryStore(async (memory) => {
+    const saved = await memory.saveMemory({ kind: "fact", subject: "Ada", content: "Born 1815." });
+
+    const file = await memory.getEntityFile("ada");
+    assert.ok(file);
+    assert.equal(file.title, "Ada");
+
+    // A human edits the Summary section; the timeline is preserved.
+    const timelinePart = file.markdown.slice(file.markdown.indexOf("## Timeline"));
+    const edited = `## Summary\n\nThe storage lead.\n\n${timelinePart}`;
+    const profile = await memory.saveEntityFile("ada", edited, "human");
+
+    assert.equal(profile?.entity.profile, "The storage lead.");
+    assert.equal(profile?.memories.length, 1); // the fact survived the edit
+    assert.equal(profile?.memories[0].id, saved.id);
+  });
+});

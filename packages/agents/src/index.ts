@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
 import type { GitWriter } from "@company-brain/git-writer";
 import type { PageFrontmatter, Workspace } from "@company-brain/workspace";
 import { parseAgent } from "./agent-file.ts";
 import { parseJob } from "./job-file.ts";
 import { buildConversationFile, parseConversation, type ConversationDoc, type ConversationStatus } from "./conversation-file.ts";
+import type { ProviderRegistry, RunResult } from "./provider.ts";
 
 export * from "./agent-file.ts";
 export * from "./job-file.ts";
@@ -202,6 +203,8 @@ export function agentAreasCommitHook(db: CompanyBrainDb, workspace: Workspace) {
 export interface AgentStoreOptions {
   gitWriter?: GitWriter;
   workspace?: Workspace;
+  /** Provider registry for runAgent; required to execute runs. */
+  providers?: ProviderRegistry;
 }
 
 export interface Agent {
@@ -334,6 +337,7 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
   const agentDb = db ?? (await createDb());
   const gitWriter = opts?.gitWriter;
   const workspace = opts?.workspace;
+  const providers = opts?.providers;
   const fileMode = Boolean(gitWriter && workspace);
 
   if (fileMode) {
@@ -433,6 +437,56 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       });
       const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1", [doc.id]);
       return result.rows[0] ? toConversation(result.rows[0]) : null;
+    },
+
+    /**
+     * Run an agent to completion and write the transcript once. Resolves the
+     * agent's persona (system prompt) + provider, executes, and records a
+     * conversation — including a `failed` transcript when the provider is
+     * unavailable or errors (never throws on a run failure, only on bad input).
+     */
+    async runAgent(input: {
+      agentSlug: string;
+      prompt: string;
+      jobSlug?: string;
+      providerOverride?: string;
+      timeoutMs?: number;
+      actor?: string;
+    }): Promise<Conversation | null> {
+      if (!fileMode) throw new Error("runAgent requires file mode (gitWriter + workspace).");
+      if (!providers) throw new Error("runAgent requires a provider registry.");
+      const agent = await this.getAgent(input.agentSlug);
+      if (!agent) throw new Error(`Agent not found: ${input.agentSlug}`);
+
+      const file = await this.getAgentFile(input.agentSlug);
+      const systemPrompt = file?.markdown ?? "";
+      const providerId = input.providerOverride ?? agent.provider ?? null;
+      const startedAt = new Date().toISOString();
+
+      let result: RunResult;
+      if (!providerId) {
+        result = { status: "failed", turns: [], error: `No provider configured for agent "${input.agentSlug}".` };
+      } else {
+        const provider = providers.get(providerId);
+        result = provider
+          ? await provider.run({ systemPrompt, prompt: input.prompt, model: agent.model ?? undefined, timeoutMs: input.timeoutMs })
+          : { status: "failed", turns: [], error: `Unknown provider "${providerId}".` };
+      }
+
+      const doc: ConversationDoc = {
+        id: randomUUID(),
+        agent: input.agentSlug,
+        job: input.jobSlug,
+        status: result.status,
+        provider: providerId ?? "none",
+        model: agent.model ?? undefined,
+        startedAt,
+        endedAt: new Date().toISOString(),
+        usage: result.usage,
+        error: result.error,
+        turns: [{ role: "user", content: input.prompt }, ...result.turns],
+      };
+      return this.saveConversation(doc, input.actor ?? input.agentSlug);
     },
   };
 }

@@ -13,6 +13,14 @@ import {
   type RecallSearchMode
 } from "@company-brain/memory";
 import {
+  createAgentStore,
+  createProviderRegistry,
+  reindexAllAgentAreas,
+  claudeLocalProvider,
+  codexLocalProvider,
+  type ConversationStatus
+} from "@company-brain/agents";
+import {
   createPageStore,
   reindexAllPages,
   type Page,
@@ -248,6 +256,22 @@ async function directPageStore() {
   });
 }
 
+function directProviderRegistry() {
+  const providers = createProviderRegistry();
+  providers.register(claudeLocalProvider());
+  providers.register(codexLocalProvider());
+  return providers;
+}
+
+async function directAgentStore() {
+  const workspaceDir = resolveWorkspaceDir();
+  return createAgentStore(await createDb(), {
+    gitWriter: createGitWriter({ workspaceDir }),
+    workspace: createWorkspace({ workspaceDir }),
+    providers: directProviderRegistry(),
+  });
+}
+
 async function resolvePage(ref: string) {
   const pages = await createPageStore();
   const byId = await pages.get(ref);
@@ -475,6 +499,7 @@ async function main() {
     const workspace = createWorkspace({ workspaceDir: resolveWorkspaceDir() });
     await reindexAllPages(db, workspace);
     await reindexAllEntities(db, workspace);
+    await reindexAllAgentAreas(db, workspace);
     await db.close();
     printJson({ ok: true, mode: "direct" });
     return;
@@ -488,6 +513,22 @@ async function main() {
   if (command !== "pages") {
     if (command === "memory") {
       await handleMemoryCommand(subcommand, rest);
+      return;
+    }
+    if (command === "agents") {
+      await handleAgentsCommand(subcommand, rest);
+      return;
+    }
+    if (command === "jobs") {
+      await handleJobsCommand(subcommand, rest);
+      return;
+    }
+    if (command === "conversations") {
+      await handleConversationsCommand(subcommand, rest);
+      return;
+    }
+    if (command === "providers") {
+      await handleProvidersCommand([subcommand, ...rest].filter((x): x is string => Boolean(x)));
       return;
     }
 
@@ -918,6 +959,121 @@ async function handleImportCommand(subcommand: string | undefined, rest: string[
   });
 }
 
+async function agentMode(rest: string[]) {
+  const { flags, positionals } = parseFlags(rest);
+  const useApi = !flags.direct && (await canUseApi());
+  if (!useApi && !flags.direct) {
+    throw new Error("Company Brain API is not reachable. Start `pnpm dev` or pass --direct for local PGlite access.");
+  }
+  return { flags, positionals, useApi };
+}
+
+async function handleAgentsCommand(subcommand: string | undefined, rest: string[]) {
+  const { flags, positionals, useApi } = await agentMode(rest);
+
+  if (subcommand === "list") {
+    const agents = useApi
+      ? (await requestApi<{ agents: unknown[] }>("/api/agents")).agents
+      : await (await directAgentStore()).listAgents();
+    printJson({ agents });
+    return;
+  }
+
+  if (subcommand === "show") {
+    const slug = positionals[0];
+    if (!slug) throw new Error("agents show requires <slug>");
+    const agent = useApi
+      ? (await requestApi<{ agent: unknown }>(`/api/agents/${encodeURIComponent(slug)}`)).agent
+      : await (await directAgentStore()).getAgent(slug);
+    if (!agent) throw new Error(`Agent not found: ${slug}`);
+    printJson({ agent });
+    return;
+  }
+
+  if (subcommand === "run") {
+    const slug = positionals[0];
+    if (!slug) throw new Error("agents run requires <slug>");
+    const prompt = flagString(flags, "prompt");
+    if (!prompt) throw new Error("agents run requires --prompt");
+    const provider = flagString(flags, "provider");
+    const actor = flagString(flags, "actor") ?? "cli";
+    if (flags.direct && (await canUseApi())) {
+      throw new Error("Refusing --direct run: the server is running and owns the workspace. Omit --direct, or stop the server first.");
+    }
+    const conversation = useApi
+      ? (
+          await requestApi<{ conversation: unknown }>(`/api/agents/${encodeURIComponent(slug)}/run`, {
+            method: "POST",
+            body: JSON.stringify({ prompt, provider, actor })
+          })
+        ).conversation
+      : await (await directAgentStore()).runAgent({ agentSlug: slug, prompt, providerOverride: provider, actor });
+    printJson({ conversation });
+    return;
+  }
+
+  throw new Error(`Unknown agents subcommand: ${subcommand ?? "(none)"}. Try: list, show <slug>, run <slug> --prompt`);
+}
+
+async function handleJobsCommand(subcommand: string | undefined, rest: string[]) {
+  const { positionals, useApi } = await agentMode(rest);
+  if (subcommand === "list") {
+    const jobs = useApi ? (await requestApi<{ jobs: unknown[] }>("/api/jobs")).jobs : await (await directAgentStore()).listJobs();
+    printJson({ jobs });
+    return;
+  }
+  if (subcommand === "show") {
+    const slug = positionals[0];
+    if (!slug) throw new Error("jobs show requires <slug>");
+    const job = useApi
+      ? (await requestApi<{ job: unknown }>(`/api/jobs/${encodeURIComponent(slug)}`)).job
+      : await (await directAgentStore()).getJob(slug);
+    if (!job) throw new Error(`Job not found: ${slug}`);
+    printJson({ job });
+    return;
+  }
+  throw new Error(`Unknown jobs subcommand: ${subcommand ?? "(none)"}. Try: list, show <slug>`);
+}
+
+async function handleConversationsCommand(subcommand: string | undefined, rest: string[]) {
+  const { flags, positionals, useApi } = await agentMode(rest);
+  if (subcommand === "list") {
+    const status = flagString(flags, "status") as ConversationStatus | undefined;
+    const agent = flagString(flags, "agent");
+    if (useApi) {
+      const params = new URLSearchParams();
+      if (status) params.set("status", status);
+      if (agent) params.set("agent", agent);
+      const query = params.toString();
+      const data = await requestApi<{ conversations: unknown[] }>(`/api/conversations${query ? `?${query}` : ""}`);
+      printJson({ conversations: data.conversations });
+    } else {
+      const conversations = await (await directAgentStore()).listConversations({ status, agent });
+      printJson({ conversations });
+    }
+    return;
+  }
+  if (subcommand === "show") {
+    const id = positionals[0];
+    if (!id) throw new Error("conversations show requires <id>");
+    const conversation = useApi
+      ? (await requestApi<{ conversation: unknown }>(`/api/conversations/${encodeURIComponent(id)}`)).conversation
+      : await (await directAgentStore()).getConversation(id);
+    if (!conversation) throw new Error(`Conversation not found: ${id}`);
+    printJson({ conversation });
+    return;
+  }
+  throw new Error(`Unknown conversations subcommand: ${subcommand ?? "(none)"}. Try: list [--status --agent], show <id>`);
+}
+
+async function handleProvidersCommand(rest: string[]) {
+  const { useApi } = await agentMode(rest);
+  const providers = useApi
+    ? (await requestApi<{ providers: unknown[] }>("/api/providers")).providers
+    : await directProviderRegistry().detectAll();
+  printJson({ providers });
+}
+
 async function handleMemoryCommand(subcommand: string | undefined, rest: string[]) {
   const { flags, positionals } = parseFlags(rest);
   const json = Boolean(flags.json);
@@ -1084,6 +1240,15 @@ Usage:
   pnpm cb pages move <id-or-slug> [parent-id-or-slug|top]
   pnpm cb pages delete <id-or-slug>
   pnpm cb pages restore <id-or-slug> <version-id>
+  pnpm cb agents list [--json]
+  pnpm cb agents show <slug>
+  pnpm cb agents run <slug> --prompt "..." [--provider claude_local|codex_local]
+  pnpm cb jobs list [--json]
+  pnpm cb jobs show <slug>
+  pnpm cb conversations list [--status done|failed|running|awaiting_input|archived] [--agent <slug>]
+  pnpm cb conversations show <id>
+  pnpm cb providers
+  pnpm cb reindex [--direct]
 
 Options:
   --actor <name>  Actor recorded in page metadata. Defaults to cli.

@@ -17,6 +17,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@company-brain/agents':
+        specifier: workspace:*
+        version: link:../../packages/agents
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -58,6 +61,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@company-brain/agents':
+        specifier: workspace:*
+        version: link:../../packages/agents
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db

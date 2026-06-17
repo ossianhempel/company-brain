@@ -7,6 +7,14 @@ import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writ
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
+import {
+  createAgentStore,
+  createProviderRegistry,
+  createScheduler,
+  reindexAllAgentAreas,
+  claudeLocalProvider,
+  codexLocalProvider,
+} from "@company-brain/agents";
 
 const pageInput = z.object({
   title: z.string().min(1),
@@ -99,6 +107,23 @@ const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
 const memory = await createMemoryStore(db, { gitWriter, workspace });
 
+// Agent runtime: provider registry (local-CLI providers), the agent store, and
+// the in-process scheduler. The scheduler can run installed agent CLIs on a
+// schedule, so it is opt-out via COMPANY_BRAIN_DISABLE_SCHEDULER for operators
+// who don't want host execution.
+const providers = createProviderRegistry();
+providers.register(claudeLocalProvider());
+providers.register(codexLocalProvider());
+const agents = await createAgentStore(db, { gitWriter, workspace, providers });
+const scheduler = createScheduler({
+  store: agents,
+  runAgent: (input) => agents.runAgent(input),
+  workspaceDir,
+});
+if (process.env.COMPANY_BRAIN_DISABLE_SCHEDULER !== "1") {
+  await scheduler.start();
+}
+
 app.use("*", cors());
 
 // Optimistic-concurrency conflicts from the git writer map to HTTP 409.
@@ -118,7 +143,82 @@ app.get("/health", (c) => {
 app.post("/api/admin/reindex", async (c) => {
   await reindexAllPages(db, workspace);
   await reindexAllEntities(db, workspace);
+  await reindexAllAgentAreas(db, workspace);
   return c.json({ ok: true });
+});
+
+// --- Agent runtime: agents, jobs, conversations, providers ------------------
+
+app.get("/api/agents", async (c) => {
+  return c.json({ agents: await agents.listAgents() });
+});
+
+app.get("/api/agents/:slug", async (c) => {
+  const agent = await agents.getAgent(c.req.param("slug"));
+  if (!agent) return c.json({ error: "Agent not found" }, 404);
+  return c.json({ agent });
+});
+
+app.get("/api/agents/:slug/file", async (c) => {
+  const file = await agents.getAgentFile(c.req.param("slug"));
+  if (!file) return c.json({ error: "Agent file not found" }, 404);
+  return c.json(file);
+});
+
+app.put("/api/agents/:slug/file", async (c) => {
+  const body = z.object({ markdown: z.string(), actor: z.string().min(1).optional() }).parse(await c.req.json());
+  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor);
+  return c.json({ agent });
+});
+
+app.post("/api/agents/:slug/run", async (c) => {
+  const body = z
+    .object({ prompt: z.string().min(1), provider: z.string().optional(), actor: z.string().min(1).optional() })
+    .parse(await c.req.json());
+  try {
+    const conversation = await agents.runAgent({
+      agentSlug: c.req.param("slug"),
+      prompt: body.prompt,
+      providerOverride: body.provider,
+      actor: body.actor,
+    });
+    return c.json({ conversation });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "run failed" }, 404);
+  }
+});
+
+app.get("/api/jobs", async (c) => {
+  return c.json({ jobs: await agents.listJobs() });
+});
+
+app.get("/api/jobs/:slug", async (c) => {
+  const job = await agents.getJob(c.req.param("slug"));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  return c.json({ job });
+});
+
+const conversationStatus = z.enum(["running", "awaiting_input", "done", "failed", "archived"]);
+
+app.get("/api/conversations", async (c) => {
+  const statusParam = c.req.query("status");
+  const parsedStatus = conversationStatus.safeParse(statusParam);
+  const conversations = await agents.listConversations({
+    status: parsedStatus.success ? parsedStatus.data : undefined,
+    agent: c.req.query("agent") || undefined,
+    limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+  });
+  return c.json({ conversations });
+});
+
+app.get("/api/conversations/:id", async (c) => {
+  const conversation = await agents.getConversation(c.req.param("id"));
+  if (!conversation) return c.json({ error: "Conversation not found" }, 404);
+  return c.json({ conversation });
+});
+
+app.get("/api/providers", async (c) => {
+  return c.json({ providers: await providers.detectAll() });
 });
 
 app.get("/api/pages", async (c) => {

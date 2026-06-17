@@ -121,9 +121,10 @@ export class WorkspaceConflictError extends Error {
 export function createGitWriter(options: GitWriterOptions) {
   const dir = options.workspaceDir;
   const defaultBranch = options.defaultBranch ?? "main";
-  // The post-commit hook can be set at construction or bound later (e.g. once
-  // the page store can supply the reindex function). It runs inside the queue.
-  let commitHook = options.onCommit;
+  // Post-commit hooks run inside the queue after each commit. Multiple stores
+  // (pages, memory) each register a hook that filters to the paths/area it owns.
+  const commitHooks: NonNullable<GitWriterOptions["onCommit"]>[] = [];
+  if (options.onCommit) commitHooks.push(options.onCommit);
 
   async function isRepo(): Promise<boolean> {
     return existsSync(join(dir, ".git"));
@@ -343,8 +344,10 @@ export function createGitWriter(options: GitWriterOptions) {
     // error) must NOT roll back the committed canonical file — that would leave
     // git history ahead of a reverted worktree. Surface the error so the caller
     // can retry; the derived index is recoverable via reindex.
-    if (changed && commitHook) {
-      await commitHook({ paths: mutation.paths, hash });
+    if (changed) {
+      for (const hook of commitHooks) {
+        await hook({ paths: mutation.paths, hash });
+      }
     }
     return { hash, changed };
   }
@@ -360,9 +363,15 @@ export function createGitWriter(options: GitWriterOptions) {
     return result;
   }
 
-  /** Bind (or replace) the in-queue post-commit hook after construction. */
+  /** Replace all in-queue post-commit hooks with a single one (back-compat). */
   function setOnCommit(hook: GitWriterOptions["onCommit"]): void {
-    commitHook = hook;
+    commitHooks.length = 0;
+    if (hook) commitHooks.push(hook);
+  }
+
+  /** Append an in-queue post-commit hook (each store registers its own). */
+  function addCommitHook(hook: NonNullable<GitWriterOptions["onCommit"]>): void {
+    commitHooks.push(hook);
   }
 
   return {
@@ -371,6 +380,7 @@ export function createGitWriter(options: GitWriterOptions) {
     stageAndCommit,
     enqueue,
     setOnCommit,
+    addCommitHook,
     history,
     diff,
     commitMeta,

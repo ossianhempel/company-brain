@@ -1,5 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import type { Workspace } from "@company-brain/workspace";
+import { parseEntity } from "./entity-file.ts";
 
 export type SourceArtifact = {
   id: string;
@@ -314,6 +316,102 @@ function rankWithBm25(candidates: RecallCandidate[], terms: string[], limit: num
     .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
     .slice(0, limit)
     .map(({ searchText: _searchText, lexicalBoost: _lexicalBoost, ...result }) => result);
+}
+
+async function tombstoneEntityBySlug(db: CompanyBrainDb, slug: string): Promise<void> {
+  const row = await db.query<{ id: string }>(
+    "select id from entities where slug = $1 and deleted_at is null",
+    [slug]
+  );
+  const id = row.rows[0]?.id;
+  if (!id) return;
+  await db.query("delete from memories where entity_id = $1", [id]); // cascades memory_sources
+  await db.query("update entities set deleted_at = now() where id = $1", [id]);
+}
+
+/**
+ * Rebuild the derived index for entity files at the given slugs (the single
+ * memory index writer — mirrors reindexPages). A missing file tombstones the
+ * entity and drops its atomized memories. Incremental via content_hash.
+ */
+export async function reindexEntities(
+  db: CompanyBrainDb,
+  workspace: Workspace,
+  slugs: string[]
+): Promise<void> {
+  for (const slug of slugs) {
+    const stored = await workspace.readEntity(slug);
+    if (!stored) {
+      await tombstoneEntityBySlug(db, slug);
+      continue;
+    }
+
+    const hash = createHash("sha256")
+      .update(JSON.stringify(stored.frontmatter))
+      .update("\n")
+      .update(stored.markdown)
+      .digest("hex");
+    const doc = parseEntity(stored);
+    const existing = await db.query<{ content_hash: string | null }>(
+      "select content_hash from entities where id = $1 and deleted_at is null",
+      [doc.id]
+    );
+    if (existing.rows[0]?.content_hash === hash) continue; // unchanged
+
+    await db.query(
+      `
+        insert into entities (id, slug, title, type, profile, tags_json, content_hash)
+        values ($1, $2, $3, $4, $5, $6, $7)
+        on conflict (id) do update set
+          slug = excluded.slug,
+          title = excluded.title,
+          type = excluded.type,
+          profile = excluded.profile,
+          tags_json = excluded.tags_json,
+          content_hash = excluded.content_hash,
+          updated_at = now(),
+          deleted_at = null
+      `,
+      [doc.id, slug, doc.title, doc.type, doc.profile, JSON.stringify(doc.tags), hash]
+    );
+
+    // Re-atomize the entity's facts into the derived memories index.
+    await db.query("delete from memories where entity_id = $1", [doc.id]);
+    for (const fact of doc.facts) {
+      await db.query(
+        `
+          insert into memories (id, kind, content, subject, status, confidence, created_by, entity_id)
+          values ($1, $2, $3, $4, $5, $6, 'system', $7)
+        `,
+        [fact.id, fact.kind, fact.content, doc.title, fact.status, fact.confidence, doc.id]
+      );
+      for (const citeSlug of fact.citations) {
+        const page = await db.query<{ id: string }>(
+          "select id from pages where slug = $1 and deleted_at is null",
+          [citeSlug]
+        );
+        await db.query(
+          `
+            insert into memory_sources (id, memory_id, source_type, page_id, quote)
+            values ($1, $2, 'page', $3, null)
+          `,
+          [randomUUID(), fact.id, page.rows[0]?.id ?? null]
+        );
+      }
+    }
+  }
+}
+
+/** Rebuild the entire entity index from every entity file on disk. */
+export async function reindexAllEntities(db: CompanyBrainDb, workspace: Workspace): Promise<void> {
+  const slugs = await workspace.listEntitySlugs();
+  await reindexEntities(db, workspace, slugs);
+
+  const onDisk = new Set(slugs);
+  const live = await db.query<{ slug: string }>("select slug from entities where deleted_at is null");
+  for (const { slug } of live.rows) {
+    if (!onDisk.has(slug)) await tombstoneEntityBySlug(db, slug);
+  }
 }
 
 export async function createMemoryStore(db?: CompanyBrainDb) {

@@ -4,7 +4,30 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDb } from "@company-brain/db";
-import { createMemoryStore } from "./index.ts";
+import { createWorkspace } from "@company-brain/workspace";
+import { createMemoryStore, reindexEntities, reindexAllEntities } from "./index.ts";
+import { buildEntityFile, newFact, type EntityDoc } from "./entity-file.ts";
+
+async function withEntityIndex<T>(
+  run: (db: Awaited<ReturnType<typeof createDb>>, ws: ReturnType<typeof createWorkspace>) => Promise<T>
+) {
+  const wsDir = await mkdtemp(join(tmpdir(), "company-brain-ent-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "company-brain-ent-db-"));
+  const db = await createDb(dbDir);
+  const ws = createWorkspace({ workspaceDir: wsDir });
+  try {
+    return await run(db, ws);
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+}
+
+async function writeEntityDoc(ws: ReturnType<typeof createWorkspace>, slug: string, doc: EntityDoc) {
+  const file = buildEntityFile(doc);
+  await ws.writeEntity(slug, { frontmatter: file.frontmatter, markdown: file.markdown }, "2026-06-17T00:00:00.000Z");
+}
 
 async function withMemoryStore<T>(
   run: (memory: Awaited<ReturnType<typeof createMemoryStore>>, db: Awaited<ReturnType<typeof createDb>>) => Promise<T>
@@ -169,5 +192,65 @@ test("migration 12: entities table and memories.entity_id are usable", async () 
     assert.equal(ent.rows[0].profile, "Lead.");
     const mem = await db.query<{ entity_id: string }>("select entity_id from memories where id = $1", ["mem1"]);
     assert.equal(mem.rows[0].entity_id, "ent1");
+  });
+});
+
+// --- U4: reindexEntities ----------------------------------------------------
+
+const baseDoc = (over: Partial<EntityDoc> = {}): EntityDoc => ({
+  id: "ent-ada", title: "Ada", type: "person", tags: ["eng"], profile: "Lead.", facts: [], ...over,
+});
+
+test("reindexEntities atomizes an entity file into entities + memories rows", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await writeEntityDoc(ws, "ada", baseDoc({
+      facts: [
+        newFact({ kind: "decision", content: "Chose isomorphic-git.", date: "2026-06-17", id: "f1" }),
+        newFact({ kind: "preference", content: "Prefers files-canonical.", date: "2026-06-15", id: "f2" }),
+      ],
+    }));
+    await reindexEntities(db, ws, ["ada"]);
+
+    const ent = await db.query<{ title: string; profile: string }>("select title, profile from entities where slug = $1", ["ada"]);
+    assert.equal(ent.rows[0].title, "Ada");
+    assert.equal(ent.rows[0].profile, "Lead.");
+    const mems = await db.query<{ id: string }>("select id from memories where entity_id = $1 order by id", ["ent-ada"]);
+    assert.deepEqual(mems.rows.map((r) => r.id), ["f1", "f2"]);
+  });
+});
+
+test("reindexEntities is incremental (unchanged file is skipped, no dup rows)", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await writeEntityDoc(ws, "ada", baseDoc({ facts: [newFact({ kind: "fact", content: "A", date: "2026-06-17", id: "f1" })] }));
+    await reindexEntities(db, ws, ["ada"]);
+    await reindexEntities(db, ws, ["ada"]); // unchanged
+    const mems = await db.query<{ n: string }>("select count(*) as n from memories where entity_id = $1", ["ent-ada"]);
+    assert.equal(Number(mems.rows[0].n), 1);
+  });
+});
+
+test("reindexAllEntities tombstones an entity whose file was removed", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await writeEntityDoc(ws, "ada", baseDoc({ facts: [newFact({ kind: "fact", content: "A", date: "2026-06-17", id: "f1" })] }));
+    await reindexAllEntities(db, ws);
+    await ws.deleteEntity("ada");
+    await reindexAllEntities(db, ws);
+    const ent = await db.query<{ deleted_at: string | null }>("select deleted_at from entities where id = $1", ["ent-ada"]);
+    assert.notEqual(ent.rows[0].deleted_at, null);
+    const mems = await db.query<{ n: string }>("select count(*) as n from memories where entity_id = $1", ["ent-ada"]);
+    assert.equal(Number(mems.rows[0].n), 0);
+  });
+});
+
+test("reindexEntities resolves [[slug]] citations to a page id", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await db.query(
+      "insert into pages (id, title, slug, html, plain_text, creator, created_by, updated_by) values ($1,$2,$3,$4,$5,'t','t','t')",
+      ["page-spec", "Spec", "spec", "<h1>Spec</h1>", "Spec"]
+    );
+    await writeEntityDoc(ws, "ada", baseDoc({ facts: [newFact({ kind: "decision", content: "Per the [[spec]].", date: "2026-06-17", id: "f1" })] }));
+    await reindexEntities(db, ws, ["ada"]);
+    const src = await db.query<{ page_id: string | null }>("select page_id from memory_sources where memory_id = $1", ["f1"]);
+    assert.equal(src.rows[0].page_id, "page-spec");
   });
 });

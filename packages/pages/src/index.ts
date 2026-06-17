@@ -995,9 +995,15 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
   // Derive the DB index inside the git writer's serialized commit hook, so the
   // index update is atomic with the commit (never races a concurrent mutation).
   if (fileMode) {
-    gitWriter!.setOnCommit(async ({ paths }) => {
-      const slugs = [...new Set(paths.map((p) => workspace!.slugFromPath(p)))];
-      await reindexPages(pageDb, workspace!, slugs);
+    gitWriter!.addCommitHook(async ({ paths }) => {
+      const slugs = [
+        ...new Set(
+          paths
+            .filter((p) => workspace!.pathArea(p) === "pages")
+            .map((p) => workspace!.slugFromPath(p))
+        ),
+      ];
+      if (slugs.length) await reindexPages(pageDb, workspace!, slugs);
     });
   }
 

@@ -468,6 +468,7 @@ export function App() {
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(null);
   const [agentPrompt, setAgentPrompt] = useState("");
   const [agentRunning, setAgentRunning] = useState(false);
+  const [agentRunError, setAgentRunError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
@@ -747,13 +748,21 @@ export function App() {
   async function runSelectedAgent() {
     if (!selectedAgentSlug || !agentPrompt.trim()) return;
     setAgentRunning(true);
+    setAgentRunError(null);
     try {
-      await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/run`, {
+      const response = await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: agentPrompt, actor: "web" })
       });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setAgentRunError(body.error ?? `Run failed (${response.status})`);
+        return;
+      }
       setAgentPrompt("");
+    } catch {
+      setAgentRunError("Run request failed — is the server reachable?");
     } finally {
       setAgentRunning(false);
     }
@@ -1513,6 +1522,7 @@ export function App() {
                     <button type="button" onClick={runSelectedAgent} disabled={agentRunning || !agentPrompt.trim()}>
                       {agentRunning ? "Running…" : "Run agent"}
                     </button>
+                    {agentRunError && <p className="runError">{agentRunError}</p>}
                   </div>
                 )}
               </aside>

@@ -60,3 +60,8 @@ The repo vendors implementation skills under `.agents/skills/`:
 - `.agents/skills/ce-agent-native-audit`: use when reviewing the codebase against agent-native architecture principles or scoring gaps across parity, primitive tools, context injection, shared workspace behavior, CRUD completeness, UI integration, capability discovery, and prompt-native features.
 
 Every web UI action should map to a backend action that can also be exposed through CLI and MCP.
+
+## Documented Knowledge
+
+- `docs/solutions/` — documented solutions to past problems (bugs, best practices, architecture/design patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in documented areas.
+- `CONCEPTS.md` — shared domain vocabulary (entities, named processes, status concepts) with project-specific meaning. Relevant when orienting to the codebase or discussing domain concepts.

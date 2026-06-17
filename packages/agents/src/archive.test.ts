@@ -8,14 +8,16 @@ import { createWorkspace } from "@company-brain/workspace";
 import { createGitWriter } from "@company-brain/git-writer";
 import { createAgentStore, type ConversationDoc } from "./index.ts";
 
-async function withStore<T>(run: (store: Awaited<ReturnType<typeof createAgentStore>>) => Promise<T>) {
+async function withStore<T>(
+  run: (store: Awaited<ReturnType<typeof createAgentStore>>, db: Awaited<ReturnType<typeof createDb>>) => Promise<T>
+) {
   const wsDir = await mkdtemp(join(tmpdir(), "cb-arch-ws-"));
   const dbDir = await mkdtemp(join(tmpdir(), "cb-arch-db-"));
   const db = await createDb(dbDir);
   const ws = createWorkspace({ workspaceDir: wsDir });
   const gw = createGitWriter({ workspaceDir: wsDir });
   try {
-    return await run(await createAgentStore(db, { gitWriter: gw, workspace: ws }));
+    return await run(await createAgentStore(db, { gitWriter: gw, workspace: ws }), db);
   } finally {
     await db.close();
     await rm(wsDir, { recursive: true, force: true });
@@ -57,5 +59,17 @@ test("archiveConversation is idempotent and null for a missing id", async () => 
     await store.archiveConversation("c2");
     const again = await store.archiveConversation("c2"); // already archived
     assert.equal(again?.status, "archived");
+  });
+});
+
+test("archive returns a file-derived conversation when the index row is missing", async () => {
+  await withStore(async (store, db) => {
+    await store.saveConversation(doneConv("c3"));
+    // Simulate a stale/missing derived index: drop the row but keep the file.
+    await db.query("delete from conversations where id = $1", ["c3"]);
+    const archived = await store.archiveConversation("c3");
+    assert.ok(archived); // not a spurious null/404
+    assert.equal(archived.id, "c3");
+    assert.equal(archived.status, "archived");
   });
 });

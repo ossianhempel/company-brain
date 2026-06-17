@@ -482,7 +482,21 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         });
       }
       const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1", [id]);
-      return result.rows[0] ? toConversation(result.rows[0]) : null;
+      if (result.rows[0]) return toConversation(result.rows[0]);
+      // The file exists (read above) but the derived row is missing/stale — derive
+      // the result from the file so callers don't see a spurious 404.
+      return {
+        id: doc.id || id,
+        agent: doc.agent,
+        job: doc.job ?? null,
+        status: "archived",
+        provider: doc.provider ?? null,
+        model: doc.model ?? null,
+        startedAt: doc.startedAt || null,
+        endedAt: doc.endedAt ?? null,
+        usage: doc.usage ?? null,
+        error: doc.error ?? null,
+      };
     },
 
     /** Write a conversation transcript once (the finalized run) through the writer. */

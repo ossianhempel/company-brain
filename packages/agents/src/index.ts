@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import type { CompanyBrainDb } from "@company-brain/db";
+import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import type { GitWriter } from "@company-brain/git-writer";
 import type { PageFrontmatter, Workspace } from "@company-brain/workspace";
 import { parseAgent } from "./agent-file.ts";
 import { parseJob } from "./job-file.ts";
-import { parseConversation } from "./conversation-file.ts";
+import { buildConversationFile, parseConversation, type ConversationDoc, type ConversationStatus } from "./conversation-file.ts";
 
 export * from "./agent-file.ts";
 export * from "./job-file.ts";
@@ -188,5 +189,249 @@ export function agentAreasCommitHook(db: CompanyBrainDb, workspace: Workspace) {
     if (agents.length) await reindexAgents(db, workspace, agents);
     if (jobs.length) await reindexJobs(db, workspace, jobs);
     if (conversations.length) await reindexConversations(db, workspace, conversations);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent store — reads over the derived index + the file-write seams (raw agent
+// edit, write-once transcript) through the single git writer. Mirrors
+// createMemoryStore: file mode activates when gitWriter + workspace are supplied.
+// ---------------------------------------------------------------------------
+
+export interface AgentStoreOptions {
+  gitWriter?: GitWriter;
+  workspace?: Workspace;
+}
+
+export interface Agent {
+  id: string;
+  slug: string;
+  name: string;
+  provider: string | null;
+  model: string | null;
+  enabled: boolean;
+  schedule: string | null;
+  tags: string[];
+}
+
+export interface Job {
+  id: string;
+  slug: string;
+  name: string;
+  enabled: boolean;
+  schedule: string;
+  agent: string;
+  provider: string | null;
+}
+
+export interface Conversation {
+  id: string;
+  agent: string;
+  job: string | null;
+  status: ConversationStatus;
+  provider: string | null;
+  model: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  usage: Record<string, unknown> | null;
+  error: string | null;
+}
+
+type AgentRow = {
+  id: string;
+  slug: string;
+  name: string;
+  provider: string | null;
+  model: string | null;
+  enabled: boolean;
+  schedule: string | null;
+  tags_json: string;
+};
+
+type JobRow = {
+  id: string;
+  slug: string;
+  name: string;
+  enabled: boolean;
+  schedule: string;
+  agent_slug: string;
+  provider: string | null;
+};
+
+type ConversationRow = {
+  id: string;
+  agent_slug: string;
+  job_slug: string | null;
+  status: string;
+  provider: string | null;
+  model: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  usage_json: string | null;
+  error: string | null;
+};
+
+function parseTags(json: string): string[] {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function toAgent(row: AgentRow): Agent {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    provider: row.provider,
+    model: row.model,
+    enabled: row.enabled,
+    schedule: row.schedule,
+    tags: parseTags(row.tags_json),
+  };
+}
+
+function toJob(row: JobRow): Job {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    enabled: row.enabled,
+    schedule: row.schedule,
+    agent: row.agent_slug,
+    provider: row.provider,
+  };
+}
+
+function toConversation(row: ConversationRow): Conversation {
+  let usage: Record<string, unknown> | null = null;
+  if (row.usage_json) {
+    try {
+      const parsed = JSON.parse(row.usage_json);
+      if (parsed && typeof parsed === "object") usage = parsed;
+    } catch {
+      /* leave null */
+    }
+  }
+  return {
+    id: row.id,
+    agent: row.agent_slug,
+    job: row.job_slug,
+    status: row.status as ConversationStatus,
+    provider: row.provider,
+    model: row.model,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    usage,
+    error: row.error,
+  };
+}
+
+export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOptions) {
+  const agentDb = db ?? (await createDb());
+  const gitWriter = opts?.gitWriter;
+  const workspace = opts?.workspace;
+  const fileMode = Boolean(gitWriter && workspace);
+
+  if (fileMode) {
+    gitWriter!.addCommitHook(agentAreasCommitHook(agentDb, workspace!));
+  }
+
+  return {
+    async listAgents(): Promise<Agent[]> {
+      const result = await agentDb.query<AgentRow>("select * from agents where deleted_at is null order by name asc");
+      return result.rows.map(toAgent);
+    },
+
+    async getAgent(slug: string): Promise<Agent | null> {
+      const result = await agentDb.query<AgentRow>("select * from agents where slug = $1 and deleted_at is null", [slug]);
+      return result.rows[0] ? toAgent(result.rows[0]) : null;
+    },
+
+    /** The raw agent file (system-prompt body) for editing in the workspace UI. */
+    async getAgentFile(slug: string): Promise<{ slug: string; name: string; markdown: string } | null> {
+      if (!fileMode) return null;
+      const stored = await workspace!.readAgent(slug);
+      if (!stored) return null;
+      return { slug, name: stored.frontmatter.title, markdown: stored.markdown };
+    },
+
+    /** Save a raw human edit of an agent file through the single writer -> reindex. */
+    async saveAgentFile(slug: string, markdown: string, actor = "local-user"): Promise<Agent | null> {
+      if (!fileMode) throw new Error("Editing agent files requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      await gitWriter!.enqueue({
+        paths: [ws.agentFilePath(slug)],
+        message: `agent: edit ${slug}`,
+        actor: { name: actor },
+        write: async () => {
+          const cur = await ws.readAgent(slug);
+          const frontmatter = cur?.frontmatter ?? { id: undefined, title: slug };
+          await ws.writeAgent(slug, { frontmatter, markdown }, new Date().toISOString());
+        },
+      });
+      return this.getAgent(slug);
+    },
+
+    async listJobs(): Promise<Job[]> {
+      const result = await agentDb.query<JobRow>("select * from jobs where deleted_at is null order by name asc");
+      return result.rows.map(toJob);
+    },
+
+    async getJob(slug: string): Promise<Job | null> {
+      const result = await agentDb.query<JobRow>("select * from jobs where slug = $1 and deleted_at is null", [slug]);
+      return result.rows[0] ? toJob(result.rows[0]) : null;
+    },
+
+    async listConversations(input?: { status?: ConversationStatus; agent?: string; limit?: number }): Promise<Conversation[]> {
+      const where = ["deleted_at is null"];
+      const params: unknown[] = [];
+      if (input?.status) {
+        params.push(input.status);
+        where.push(`status = $${params.length}`);
+      }
+      if (input?.agent) {
+        params.push(input.agent);
+        where.push(`agent_slug = $${params.length}`);
+      }
+      const limit = Math.min(Math.max(input?.limit ?? 100, 1), 500);
+      const result = await agentDb.query<ConversationRow>(
+        `select * from conversations where ${where.join(" and ")} order by started_at desc nulls last limit ${limit}`,
+        params
+      );
+      return result.rows.map(toConversation);
+    },
+
+    /** A conversation's metadata plus its full transcript turns (from the file). */
+    async getConversation(id: string): Promise<(Conversation & { turns: ConversationDoc["turns"] }) | null> {
+      const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1 and deleted_at is null", [id]);
+      const row = result.rows[0];
+      if (!row) return null;
+      let turns: ConversationDoc["turns"] = [];
+      if (fileMode) {
+        const stored = await workspace!.readConversation(id);
+        if (stored) turns = parseConversation(stored).turns;
+      }
+      return { ...toConversation(row), turns };
+    },
+
+    /** Write a conversation transcript once (the finalized run) through the writer. */
+    async saveConversation(doc: ConversationDoc, actor = "system"): Promise<Conversation | null> {
+      if (!fileMode) throw new Error("Saving conversations requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      const file = buildConversationFile(doc);
+      await gitWriter!.enqueue({
+        paths: [ws.conversationFilePath(doc.id)],
+        message: `conversation: ${doc.agent} ${doc.id}`,
+        actor: { name: actor },
+        write: async () => {
+          await ws.writeConversation(doc.id, { frontmatter: file.frontmatter, markdown: file.markdown }, new Date().toISOString());
+        },
+      });
+      const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1", [doc.id]);
+      return result.rows[0] ? toConversation(result.rows[0]) : null;
+    },
   };
 }

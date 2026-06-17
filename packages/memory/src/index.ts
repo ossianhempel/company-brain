@@ -423,11 +423,15 @@ export async function reindexEntities(
       .update(stored.markdown)
       .digest("hex");
     const doc = parseEntity(stored);
-    const existing = await db.query<{ content_hash: string | null }>(
-      "select content_hash from entities where id = $1 and deleted_at is null",
+    const existing = await db.query<{ content_hash: string | null; slug: string }>(
+      "select content_hash, slug from entities where id = $1 and deleted_at is null",
       [doc.id]
     );
-    if (existing.rows[0]?.content_hash === hash) continue; // unchanged
+    // Skip only when both the body AND the slug are unchanged. content_hash
+    // excludes the path-derived slug, so a move (same body, new slug) must still
+    // reindex — otherwise the old slug is tombstoned as missing and the entity
+    // vanishes from the derived index even though the file still exists.
+    if (existing.rows[0]?.content_hash === hash && existing.rows[0]?.slug === slug) continue;
 
     // A slug maps to one live entity (one file). If a different live row holds
     // this slug (e.g. the file was recreated with a new id), tombstone it and

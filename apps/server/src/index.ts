@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createDb } from "@company-brain/db";
 import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writer";
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
-import { createMemoryStore } from "@company-brain/memory";
+import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 
 const pageInput = z.object({
@@ -117,6 +117,7 @@ app.get("/health", (c) => {
 // Rebuild the derived index from the workspace files (admin/recovery).
 app.post("/api/admin/reindex", async (c) => {
   await reindexAllPages(db, workspace);
+  await reindexAllEntities(db, workspace);
   return c.json({ ok: true });
 });
 

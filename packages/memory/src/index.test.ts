@@ -472,3 +472,24 @@ test("a null content_hash forces a rebuild (recovery after a partial reindex)", 
     assert.equal(Number(mems.rows[0].n), 1);
   });
 });
+
+// --- PR #3 review: a moved entity (same body, new slug) must reindex ---------
+
+test("a moved entity file (same body, new slug) is reindexed, not tombstoned", async () => {
+  await withEntityIndex(async (db, ws) => {
+    const d = baseDoc({ id: "ent-move", facts: [newFact({ kind: "fact", content: "A", date: "2026-06-17", id: "f1" })] });
+    await writeEntityDoc(ws, "ada", d);
+    await reindexAllEntities(db, ws);
+
+    // Move: same content to a nested slug, remove the old path.
+    await writeEntityDoc(ws, "people/ada", d);
+    await ws.deleteEntity("ada");
+    await reindexAllEntities(db, ws);
+
+    const live = await db.query<{ slug: string }>("select slug from entities where id = $1 and deleted_at is null", ["ent-move"]);
+    assert.equal(live.rows.length, 1);
+    assert.equal(live.rows[0].slug, "people/ada"); // slug updated, not tombstoned
+    const mems = await db.query<{ n: string }>("select count(*) as n from memories where entity_id = $1", ["ent-move"]);
+    assert.equal(Number(mems.rows[0].n), 1); // memories survived the move
+  });
+});

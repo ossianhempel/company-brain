@@ -6,6 +6,7 @@ import { createDb, type CompanyBrainDb } from "@company-brain/db";
 import { createGitWriter } from "@company-brain/git-writer";
 import {
   createMemoryStore,
+  reindexAllEntities,
   type MemoryKind,
   type MemorySource,
   type RecallResponse,
@@ -43,6 +44,7 @@ const migrationTables = [
   "source_artifacts",
   "source_chunks",
   "page_source_artifacts",
+  "entities",
   "memories",
   "memory_sources"
 ];
@@ -469,6 +471,7 @@ async function main() {
     const db = await createDb();
     const workspace = createWorkspace({ workspaceDir: resolveWorkspaceDir() });
     await reindexAllPages(db, workspace);
+    await reindexAllEntities(db, workspace);
     await db.close();
     printJson({ ok: true, mode: "direct" });
     return;

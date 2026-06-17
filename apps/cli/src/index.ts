@@ -46,7 +46,10 @@ const migrationTables = [
   "page_source_artifacts",
   "entities",
   "memories",
-  "memory_sources"
+  "memory_sources",
+  "agents",
+  "jobs",
+  "conversations"
 ];
 
 function parseFlags(args: string[]) {

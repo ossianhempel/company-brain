@@ -84,15 +84,15 @@ export async function reindexJobs(db: CompanyBrainDb, workspace: Workspace, slug
     await db.query("update jobs set deleted_at = now() where slug = $1 and id <> $2 and deleted_at is null", [slug, doc.id]);
     await db.query(
       `
-        insert into jobs (id, slug, name, enabled, schedule, agent_slug, prompt, provider, timeout_ms, one_shot, content_hash)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        insert into jobs (id, slug, name, enabled, schedule, agent_slug, prompt, provider, model, timeout_ms, one_shot, content_hash)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         on conflict (id) do update set
           slug = excluded.slug, name = excluded.name, enabled = excluded.enabled,
           schedule = excluded.schedule, agent_slug = excluded.agent_slug, prompt = excluded.prompt,
-          provider = excluded.provider, timeout_ms = excluded.timeout_ms, one_shot = excluded.one_shot,
-          content_hash = excluded.content_hash, updated_at = now(), deleted_at = null
+          provider = excluded.provider, model = excluded.model, timeout_ms = excluded.timeout_ms,
+          one_shot = excluded.one_shot, content_hash = excluded.content_hash, updated_at = now(), deleted_at = null
       `,
-      [doc.id, slug, doc.name, doc.enabled, doc.schedule, doc.agent, doc.prompt, doc.provider ?? null, doc.timeoutMs ?? null, doc.oneShot ?? false, hash]
+      [doc.id, slug, doc.name, doc.enabled, doc.schedule, doc.agent, doc.prompt, doc.provider ?? null, doc.model ?? null, doc.timeoutMs ?? null, doc.oneShot ?? false, hash]
     );
   }
 }
@@ -227,6 +227,7 @@ export interface Job {
   agent: string;
   prompt: string;
   provider: string | null;
+  model: string | null;
   timeoutMs: number | null;
   oneShot: boolean;
 }
@@ -264,6 +265,7 @@ type JobRow = {
   agent_slug: string;
   prompt: string;
   provider: string | null;
+  model: string | null;
   timeout_ms: number | null;
   one_shot: boolean;
 };
@@ -313,6 +315,7 @@ function toJob(row: JobRow): Job {
     agent: row.agent_slug,
     prompt: row.prompt,
     provider: row.provider,
+    model: row.model,
     timeoutMs: row.timeout_ms,
     oneShot: row.one_shot,
   };
@@ -410,7 +413,9 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         params.push(input.agent);
         where.push(`agent_slug = $${params.length}`);
       }
-      const limit = Math.min(Math.max(input?.limit ?? 100, 1), 500);
+      // Guard NaN/non-finite (e.g. from a bad ?limit= query) so it can't reach SQL.
+      const requested = input?.limit;
+      const limit = Number.isFinite(requested) ? Math.min(Math.max(requested as number, 1), 500) : 100;
       const result = await agentDb.query<ConversationRow>(
         `select * from conversations where ${where.join(" and ")} order by started_at desc nulls last limit ${limit}`,
         params
@@ -459,6 +464,7 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       prompt: string;
       jobSlug?: string;
       providerOverride?: string;
+      modelOverride?: string;
       timeoutMs?: number;
       actor?: string;
     }): Promise<Conversation | null> {
@@ -470,6 +476,7 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       const file = await this.getAgentFile(input.agentSlug);
       const systemPrompt = file?.markdown ?? "";
       const providerId = input.providerOverride ?? agent.provider ?? null;
+      const model = input.modelOverride ?? agent.model ?? undefined;
       const startedAt = new Date().toISOString();
 
       let result: RunResult;
@@ -487,7 +494,7 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
           try {
             const detection = await provider.detect();
             result = detection.available
-              ? await provider.run({ systemPrompt, prompt: input.prompt, model: agent.model ?? undefined, timeoutMs: input.timeoutMs })
+              ? await provider.run({ systemPrompt, prompt: input.prompt, model, timeoutMs: input.timeoutMs })
               : { status: "failed", turns: [], error: detection.error ?? `Provider "${providerId}" is unavailable.` };
           } catch (err) {
             result = { status: "failed", turns: [], error: err instanceof Error ? err.message : String(err) };
@@ -501,7 +508,7 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         job: input.jobSlug,
         status: result.status,
         provider: providerId ?? "none",
-        model: agent.model ?? undefined,
+        model,
         startedAt,
         endedAt: new Date().toISOString(),
         usage: result.usage,

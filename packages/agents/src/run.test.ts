@@ -142,3 +142,13 @@ test("an unavailable provider (detect=false) is recorded as failed without runni
     assert.equal(ran, false); // run() not invoked for an unavailable provider
   });
 });
+
+test("listConversations tolerates a non-finite limit (no SQL break)", async () => {
+  await withRun(async (store, registry) => {
+    registry.register(fakeProvider("fake", async () => ({ status: "done", turns: [] })));
+    await store.saveAgentFile("scribe", "x");
+    await store.runAgent({ agentSlug: "scribe", prompt: "go", providerOverride: "fake" });
+    const list = await store.listConversations({ limit: Number("abc") }); // NaN
+    assert.equal(list.length >= 1, true); // falls back to default, doesn't throw
+  });
+});

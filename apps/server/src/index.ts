@@ -233,10 +233,11 @@ const conversationStatus = z.enum(["running", "awaiting_input", "done", "failed"
 app.get("/api/conversations", async (c) => {
   const statusParam = c.req.query("status");
   const parsedStatus = conversationStatus.safeParse(statusParam);
+  const limitRaw = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
   const conversations = await agents.listConversations({
     status: parsedStatus.success ? parsedStatus.data : undefined,
     agent: c.req.query("agent") || undefined,
-    limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
   });
   return c.json({ conversations });
 });

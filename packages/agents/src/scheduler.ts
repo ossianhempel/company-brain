@@ -28,6 +28,7 @@ export interface SchedulerDeps {
     prompt: string;
     jobSlug?: string;
     providerOverride?: string;
+    modelOverride?: string;
     timeoutMs?: number;
   }) => Promise<unknown>;
   workspaceDir: string;
@@ -109,6 +110,7 @@ export function createScheduler(deps: SchedulerDeps) {
               prompt: job.prompt,
               jobSlug: job.slug,
               providerOverride: job.provider ?? undefined,
+              modelOverride: job.model ?? undefined,
               timeoutMs: job.timeoutMs ?? undefined,
             }),
           job.oneShot ? () => task?.stop() : undefined

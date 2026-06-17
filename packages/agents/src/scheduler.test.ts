@@ -44,7 +44,11 @@ function harness(initialJobs: Job[], initialAgents: Agent[] = []) {
   };
 
   const scheduler = createScheduler({
-    store: { listJobs: async () => jobs, listAgents: async () => agents },
+    store: {
+      listJobs: async () => jobs,
+      listAgents: async () => agents,
+      hasJobRun: async (slug) => runs.some((r) => r.jobSlug === slug),
+    },
     runAgent: (input) => runImpl(input),
     workspaceDir: "/ws",
     reindex: async () => {
@@ -177,4 +181,16 @@ test("reloadSchedules reindexes canonical files before reading rows", async () =
   const before = h.reindexCalls;
   await h.scheduler.reloadSchedules();
   assert.equal(h.reindexCalls, before + 1); // every reload reindexes first
+});
+
+test("a oneShot job is not rescheduled after it has run (reload/restart safe)", async () => {
+  const h = harness([job({ oneShot: true })]);
+  await h.scheduler.start();
+  assert.equal(h.active().length, 1); // scheduled (not yet run)
+  h.tasks[0].fn();
+  await flush();
+  assert.equal(h.runs.length, 1);
+
+  await h.scheduler.reloadSchedules(); // a later reload / restart
+  assert.equal(h.active().length, 0); // not rescheduled — it already ran
 });

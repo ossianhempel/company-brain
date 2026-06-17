@@ -22,7 +22,12 @@ export interface FsWatcher {
 }
 
 export interface SchedulerDeps {
-  store: { listJobs(): Promise<Job[]>; listAgents(): Promise<Agent[]> };
+  store: {
+    listJobs(): Promise<Job[]>;
+    listAgents(): Promise<Agent[]>;
+    /** Durable "has this one-shot job already fired?" — true once a conversation exists. */
+    hasJobRun(jobSlug: string): Promise<boolean>;
+  };
   runAgent: (input: {
     agentSlug: string;
     prompt: string;
@@ -100,6 +105,9 @@ export function createScheduler(deps: SchedulerDeps) {
 
     const jobs = (await deps.store.listJobs()).filter((j) => j.enabled);
     for (const job of jobs) {
+      // A one-shot that already produced a conversation must not be rescheduled
+      // on reload/restart (the cron stop alone isn't durable).
+      if (job.oneShot && (await deps.store.hasJobRun(job.slug))) continue;
       let task: CronTask | null = null;
       const fn = () =>
         fire(

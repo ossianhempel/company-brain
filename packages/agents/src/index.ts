@@ -402,6 +402,14 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       return result.rows[0] ? toJob(result.rows[0]) : null;
     },
 
+    /** Whether a job has ever produced a conversation — the durable "has fired"
+     *  signal for one-shot jobs (conversations are files-canonical, so this
+     *  survives reload, restart, and a full reindex). */
+    async hasJobRun(jobSlug: string): Promise<boolean> {
+      const result = await agentDb.query("select 1 from conversations where job_slug = $1 and deleted_at is null limit 1", [jobSlug]);
+      return result.rows.length > 0;
+    },
+
     async listConversations(input?: { status?: ConversationStatus; agent?: string; limit?: number }): Promise<Conversation[]> {
       const where = ["deleted_at is null"];
       const params: unknown[] = [];

@@ -1509,17 +1509,6 @@ export function App() {
             {memoryViewOpen ? "Back to pages" : "Memory"}
           </button>
         )}
-        <button
-          className="sidebarSetupButton"
-          type="button"
-          onClick={() => {
-            setOnbStep(0);
-            setOnbError(null);
-            setOnboardingOpen(true);
-          }}
-        >
-          Setup
-        </button>
 
         {!teamViewOpen && !tasksViewOpen && (
         <nav className="pageList" aria-label="Pages">
@@ -1654,6 +1643,18 @@ export function App() {
           ))}
         </nav>
         )}
+
+        <button
+          className="sidebarSetupButton"
+          type="button"
+          onClick={() => {
+            setOnbStep(0);
+            setOnbError(null);
+            setOnboardingOpen(true);
+          }}
+        >
+          Setup
+        </button>
       </aside>
 
       <section className="workspace">

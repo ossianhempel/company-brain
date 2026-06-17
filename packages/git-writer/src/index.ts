@@ -47,8 +47,11 @@ export interface WorkspaceMutation {
   /** Performs the file writes/deletes for the declared paths. */
   write: () => Promise<void> | void;
   /**
-   * Optimistic-concurrency guard: the commit hash the caller last saw. If it no
-   * longer matches HEAD for the touched paths, the mutation is rejected. (U3)
+   * Optimistic-concurrency guard: the commit hash the caller last saw, compared
+   * against the workspace HEAD (repo-global, not per-page). Page mutations do
+   * NOT pass this yet — per-page conflict tokens + the merge UI are Phase 5
+   * (multi-user hardening); wiring repo-HEAD here would fire false conflicts on
+   * edits to unrelated pages. (U3)
    */
   baseVersion?: string;
 }
@@ -318,18 +321,26 @@ export function createGitWriter(options: GitWriterOptions) {
       throw new WorkspaceConflictError(mutation.baseVersion, priorHead ?? "");
     }
 
+    let hash: string;
+    let changed: boolean;
     try {
       await mutation.write();
-      const hash = await stageAndCommit(mutation.paths, mutation.message, mutation.actor);
-      const changed = hash !== priorHead;
-      if (changed && commitHook) {
-        await commitHook({ paths: mutation.paths, hash });
-      }
-      return { hash, changed };
+      hash = await stageAndCommit(mutation.paths, mutation.message, mutation.actor);
+      changed = hash !== priorHead;
     } catch (error) {
+      // Pre-commit failure: nothing is committed yet, so revert the worktree.
       await rollbackPaths(mutation.paths, priorHead);
       throw error;
     }
+
+    // The commit is durable. A post-commit hook failure (e.g. a reindex/DB
+    // error) must NOT roll back the committed canonical file — that would leave
+    // git history ahead of a reverted worktree. Surface the error so the caller
+    // can retry; the derived index is recoverable via reindex.
+    if (changed && commitHook) {
+      await commitHook({ paths: mutation.paths, hash });
+    }
+    return { hash, changed };
   }
 
   /** Enqueue a mutation; resolves/rejects after it (and its hook) complete. */

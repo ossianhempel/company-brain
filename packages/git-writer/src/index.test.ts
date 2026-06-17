@@ -307,6 +307,43 @@ test("human and agent actors produce distinct, well-formed commit authors", asyn
   });
 });
 
+test("a post-commit hook failure keeps the commit and a clean worktree", async () => {
+  let failPath = "";
+  await withWriter(
+    async (writer, dir) => {
+      await writer.enqueue({
+        paths: ["a.md"],
+        message: "seed",
+        actor,
+        write: () => writeFile(join(dir, "a.md"), "seed\n"),
+      });
+      const headAfterSeed = await writer.headOid();
+
+      failPath = "b.md"; // make the hook throw for the next commit
+      await assert.rejects(
+        () =>
+          writer.enqueue({
+            paths: ["b.md"],
+            message: "hooky",
+            actor,
+            write: () => writeFile(join(dir, "b.md"), "b\n"),
+          }),
+        /hook fail/
+      );
+
+      // The commit is durable (HEAD advanced) and the worktree is NOT rolled back.
+      assert.notEqual(await writer.headOid(), headAfterSeed);
+      assert.equal(existsSync(join(dir, "b.md")), true);
+      assert.equal((await writer.status()).clean, true);
+    },
+    {
+      onCommit: ({ paths }) => {
+        if (paths.includes(failPath)) throw new Error("hook fail");
+      },
+    }
+  );
+});
+
 // KTD1 validation spike: confirms the full isomorphic-git cycle Phase 0 relies
 // on (init -> commit -> amend-file -> commit -> log -> diff -> restore) works.
 // If this ever fails the bar, the package swaps to simple-git behind the same

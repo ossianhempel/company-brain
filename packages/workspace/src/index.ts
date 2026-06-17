@@ -110,10 +110,27 @@ export function createWorkspace(options: WorkspaceOptions) {
   // An "area" is a top-level workspace subtree (pages/, memory/, …). Page-named
   // wrappers below keep their exact signatures so the pages layer is untouched.
 
+  // Reject slugs that would escape their area (path traversal). Slugs may be
+  // nested ("a/b/c") but must not contain "..", "." segments, leading "/", or
+  // backslashes. This is the single chokepoint for every path the workspace
+  // builds (reads, writes, deletes, and git-staging paths).
+  function assertSafeSlug(slug: string): void {
+    const norm = slug.replace(/\\/g, "/");
+    const unsafe =
+      !norm ||
+      norm.startsWith("/") ||
+      norm.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+    if (unsafe) {
+      throw new Error(`Unsafe workspace slug: ${JSON.stringify(slug)}`);
+    }
+  }
+
   function areaFilePath(area: string, slug: string): string {
+    assertSafeSlug(slug);
     return `${area}/${slug}.md`;
   }
   function areaIndexPath(area: string, slug: string): string {
+    assertSafeSlug(slug);
     return `${area}/${slug}/index.md`;
   }
 

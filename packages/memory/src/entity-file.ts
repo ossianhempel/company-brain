@@ -72,11 +72,13 @@ function extractCitations(content: string): string[] {
 
 /**
  * Stable id for a fact that has no explicit marker (e.g. hand-authored). Derived
- * from its content so repeated parses / full rebuilds produce the same memory id
- * (the rebuild-from-files invariant); app-written facts always carry a marker.
+ * from the entity id + content so repeated parses / full rebuilds produce the
+ * same memory id (the rebuild-from-files invariant) AND identical hand-authored
+ * lines in different entities don't collide (the id is the global memories PK).
+ * App-written facts always carry a marker, bypassing this.
  */
-function deterministicFactId(date: string, kind: string, content: string): string {
-  return "h" + createHash("sha1").update(`${date}|${kind}|${content}`).digest("hex").slice(0, 12);
+function deterministicFactId(entityId: string, date: string, kind: string, content: string): string {
+  return "h" + createHash("sha1").update(`${entityId}|${date}|${kind}|${content}`).digest("hex").slice(0, 12);
 }
 
 /** Split the body into named `## ` sections (heading text → content). */
@@ -94,7 +96,7 @@ function sectionMap(markdown: string): Map<string, string> {
 }
 
 /** Parse one timeline list item into a fact (null if not a fact line). */
-function parseFactLine(line: string): EntityFact | null {
+function parseFactLine(line: string, entityId: string): EntityFact | null {
   const item = line.replace(/^\s*[-*]\s+/, "");
   if (item === line) return null; // not a list item
   let markerId: string | null = null;
@@ -114,8 +116,8 @@ function parseFactLine(line: string): EntityFact | null {
   const date = parts[0].trim();
   const kind = parts[1].replace(/\*\*/g, "").trim() as MemoryKind;
   const content = parts.slice(2).join(" · ").trim();
-  // Marker id wins; otherwise derive a stable id so rebuilds are deterministic.
-  const id = markerId ?? deterministicFactId(date, kind, content);
+  // Marker id wins; otherwise derive a stable, entity-namespaced id.
+  const id = markerId ?? deterministicFactId(entityId, date, kind, content);
   return { id, date, kind, content, citations: extractCitations(content), confidence, status };
 }
 
@@ -134,7 +136,7 @@ export function parseEntity(stored: StoredPage): EntityDoc {
   const timeline = sections.get("timeline") ?? "";
   const facts: EntityFact[] = [];
   for (const line of timeline.split("\n")) {
-    const fact = parseFactLine(line);
+    const fact = parseFactLine(line, fm.id);
     if (fact) facts.push(fact);
   }
   return {

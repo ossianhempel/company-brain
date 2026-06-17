@@ -183,3 +183,16 @@ test("memory area: writeEntity/readEntity round-trip and listEntitySlugs scope",
     assert.deepEqual(await ws.listPageSlugs(), []); // memory write does not leak into pages
   });
 });
+
+// --- code review: path-traversal guard --------------------------------------
+
+test("rejects path-traversal slugs at the path-construction chokepoint", async () => {
+  await withWorkspace(async (ws) => {
+    assert.throws(() => ws.entityFilePath("../../outside"));
+    assert.throws(() => ws.pageFilePath("a/../../../etc/passwd"));
+    assert.throws(() => ws.entityFilePath("/abs"));
+    await assert.rejects(() => ws.writeEntity("../evil", { frontmatter: { title: "x" }, markdown: "# x\n" }, NOW));
+    // legit nested slugs still work
+    assert.equal(ws.entityFilePath("team/eng"), "memory/team/eng.md");
+  });
+});

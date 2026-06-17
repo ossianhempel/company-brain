@@ -121,3 +121,10 @@ test("[[slug|label]] citation extracts the slug, not the label", () => {
   const f = newFact({ kind: "decision", content: "Per [[the-spec|the spec doc]].", date: NOW, id: "c9" });
   assert.deepEqual(f.citations, ["the-spec"]);
 });
+
+test("marker-less facts in different entities get distinct ids (no PK collision)", () => {
+  const md = "## Summary\n\nx\n\n## Timeline\n\n- 2026-06-17 · **status** · Active.";
+  const mk = (id: string) => parseEntity({ frontmatter: { id, title: "T", type: "person", tags: [], created: NOW, updated: NOW } as any, markdown: md }).facts[0].id;
+  assert.notEqual(mk("ent-a"), mk("ent-b")); // same line, different entity -> different memory id
+  assert.equal(mk("ent-a"), mk("ent-a")); // still stable within an entity
+});

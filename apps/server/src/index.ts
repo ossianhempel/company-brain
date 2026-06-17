@@ -125,7 +125,18 @@ if (process.env.COMPANY_BRAIN_DISABLE_SCHEDULER !== "1") {
   await scheduler.start();
 }
 
-app.use("*", cors());
+// CORS is closed to cross-origin by default. The agent runtime can spawn local
+// agent CLIs (host execution); a wide-open policy would let any web page the
+// operator visits drive the API cross-origin (e.g. trigger agent runs). The
+// same-origin web app and non-browser CLI/MCP clients are unaffected; operators
+// expose specific origins via COMPANY_BRAIN_ALLOWED_ORIGINS (comma-separated).
+// NOTE: this is hardening, not authentication — authn/RBAC is Phase 5, and the
+// server must not be exposed to untrusted networks until then.
+const allowedOrigins = (process.env.COMPANY_BRAIN_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use("*", cors({ origin: (origin) => (allowedOrigins.includes(origin) ? origin : null) }));
 
 // Optimistic-concurrency conflicts from the git writer map to HTTP 409.
 app.onError((err, c) => {
@@ -172,6 +183,10 @@ app.put("/api/agents/:slug/file", async (c) => {
   return c.json({ agent });
 });
 
+// Executes the agent's configured provider (may spawn a local CLI). Unauthenticated
+// like the rest of the API today — authn/RBAC is Phase 5; CORS is closed cross-origin
+// (above) so a browser drive-by can't reach this, and the server must stay off
+// untrusted networks until Phase 5.
 app.post("/api/agents/:slug/run", async (c) => {
   const body = z
     .object({ prompt: z.string().min(1), provider: z.string().optional(), actor: z.string().min(1).optional() })

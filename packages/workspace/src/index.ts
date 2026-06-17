@@ -38,6 +38,8 @@ export interface PageFrontmatter {
   parentPageId?: string | null;
   pinnedOrder?: number | null;
   permissionNote?: string | null;
+  /** Prior slugs this page has had, so version history follows renames. */
+  previousSlugs?: string[];
   [key: string]: unknown;
 }
 

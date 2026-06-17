@@ -500,6 +500,22 @@ test("file mode (U8): parentPageId and attribution survive a full reindex", asyn
   });
 });
 
+test("file mode: version history follows a title rename", async () => {
+  await withFilePageStore(async (pages) => {
+    const page = await pages.create({ title: "Original Title", html: "<h1>Original Title</h1><p>v1</p>", actor: "a" });
+    const renamed = await pages.update(page.id, { title: "New Title", html: "<h1>New Title</h1><p>v2</p>", actor: "b" });
+    assert.notEqual(renamed?.slug, page.slug); // slug changed
+
+    const versions = await pages.listVersions(page.id);
+    assert.equal(versions?.length, 2); // both the create (old path) and rename commits
+
+    // The pre-rename version is still restorable.
+    const oldest = versions![versions!.length - 1];
+    const got = await pages.getVersion(page.id, oldest.id);
+    assert.match(got!.html, /v1/);
+  });
+});
+
 test("file mode: getVersion attributes to the commit author, not the page owner", async () => {
   await withFilePageStore(async (pages) => {
     // owner differs from the actor so the assertion distinguishes the two.

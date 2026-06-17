@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import git from "isomorphic-git";
 
@@ -143,6 +143,9 @@ export function createGitWriter(options: GitWriterOptions) {
       }
       return;
     }
+    // git.init creates the dir itself, but ensure it explicitly so we never
+    // depend on that behavior (fresh installs may lack the parent dirs).
+    await mkdir(dir, { recursive: true });
     await git.init({ fs, dir, defaultBranch });
     await git.setConfig({ fs, dir, path: MANAGED_CONFIG_PATH, value: "true" });
   }

@@ -1002,6 +1002,14 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     if (!fileMode) return;
     const ws = workspace!;
     const markdown = ws.htmlToMarkdown(page.html);
+    const renamed = oldSlug && oldSlug !== page.slug ? oldSlug : undefined;
+
+    // Preserve (and on rename, extend) the page's slug history so version
+    // history can follow renames. Read it from the source file being superseded.
+    const sourceStored = await ws.readPage(renamed ?? page.slug);
+    const priorSlugs = (sourceStored?.frontmatter.previousSlugs as string[] | undefined) ?? [];
+    const previousSlugs = renamed ? [...priorSlugs, renamed] : priorSlugs;
+
     const frontmatter = {
       id: page.id,
       title: page.title,
@@ -1016,9 +1024,9 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
       parentPageId: page.parentPageId,
       pinnedOrder: page.pinnedOrder,
       permissionNote: page.permissionNote,
+      ...(previousSlugs.length ? { previousSlugs } : {}),
     };
     const paths = [ws.pageFilePath(page.slug)];
-    const renamed = oldSlug && oldSlug !== page.slug ? oldSlug : undefined;
     if (renamed) paths.push(ws.pageFilePath(renamed));
     await gitWriter!.enqueue({
       paths,
@@ -1539,9 +1547,23 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
         return null;
       }
 
-      // File mode: history is git. Version id = commit hash.
+      // File mode: history is git. Version id = commit hash. Follow renames by
+      // unioning history across the current path and every prior slug.
       if (fileMode) {
-        const commits = await gitWriter!.history(workspace!.pageFilePath(page.slug));
+        const stored = await workspace!.readPage(page.slug);
+        const previousSlugs = (stored?.frontmatter.previousSlugs as string[] | undefined) ?? [];
+        const paths = [page.slug, ...previousSlugs].map((s) => workspace!.pageFilePath(s));
+        const seen = new Set<string>();
+        const commits: { hash: string; author: { name: string }; timestamp: number }[] = [];
+        for (const p of paths) {
+          for (const c of await gitWriter!.history(p)) {
+            if (!seen.has(c.hash)) {
+              seen.add(c.hash);
+              commits.push(c);
+            }
+          }
+        }
+        commits.sort((a, b) => b.timestamp - a.timestamp);
         return commits.map<PageVersion>((c) => ({
           id: c.hash,
           pageId: id,
@@ -1571,12 +1593,20 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
       if (fileMode) {
         const page = await this.get(id);
         if (!page) return null;
-        let raw: string;
-        try {
-          raw = await gitWriter!.restore(versionId, workspace!.pageFilePath(page.slug));
-        } catch {
-          return null;
+        // The commit may have touched a prior path (pre-rename), so try the
+        // current slug first, then any previous slugs.
+        const current = await workspace!.readPage(page.slug);
+        const previousSlugs = (current?.frontmatter.previousSlugs as string[] | undefined) ?? [];
+        let raw: string | null = null;
+        for (const s of [page.slug, ...previousSlugs]) {
+          try {
+            raw = await gitWriter!.restore(versionId, workspace!.pageFilePath(s));
+            break;
+          } catch {
+            // try the next path
+          }
         }
+        if (raw === null) return null;
         const stored = workspace!.parsePage(raw);
         const html = workspace!.sanitizePageHtml(workspace!.markdownToHtml(stored.markdown));
         const meta = await gitWriter!.commitMeta(versionId);

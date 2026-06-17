@@ -183,11 +183,25 @@ app.put("/api/agents/:slug/file", async (c) => {
   return c.json({ agent });
 });
 
-// Executes the agent's configured provider (may spawn a local CLI). Unauthenticated
-// like the rest of the API today — authn/RBAC is Phase 5; CORS is closed cross-origin
-// (above) so a browser drive-by can't reach this, and the server must stay off
-// untrusted networks until Phase 5.
+// HTTP-triggered runs spawn the agent's configured provider (local CLI = host
+// execution), so this route is OFF BY DEFAULT. Operators opt in with
+// COMPANY_BRAIN_ENABLE_AGENT_RUN_API=1, and may additionally require a bearer
+// token via COMPANY_BRAIN_AGENT_RUN_TOKEN. Scheduled (in-process) runs are
+// unaffected. This is access control, not full auth — authn/RBAC is Phase 5,
+// and the server must stay off untrusted networks until then.
+const agentRunApiEnabled = process.env.COMPANY_BRAIN_ENABLE_AGENT_RUN_API === "1";
+const agentRunToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+
 app.post("/api/agents/:slug/run", async (c) => {
+  if (!agentRunApiEnabled) {
+    return c.json(
+      { error: "Agent run API is disabled. Set COMPANY_BRAIN_ENABLE_AGENT_RUN_API=1 to enable HTTP-triggered runs." },
+      403
+    );
+  }
+  if (agentRunToken && c.req.header("authorization") !== `Bearer ${agentRunToken}`) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
   const body = z
     .object({ prompt: z.string().min(1), provider: z.string().optional(), actor: z.string().min(1).optional() })
     .parse(await c.req.json());

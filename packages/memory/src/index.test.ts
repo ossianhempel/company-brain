@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -252,5 +253,76 @@ test("reindexEntities resolves [[slug]] citations to a page id", async () => {
     await reindexEntities(db, ws, ["ada"]);
     const src = await db.query<{ page_id: string | null }>("select page_id from memory_sources where memory_id = $1", ["f1"]);
     assert.equal(src.rows[0].page_id, "page-spec");
+  });
+});
+
+// --- U5: file-first memory store --------------------------------------------
+
+import { createGitWriter } from "@company-brain/git-writer";
+
+async function withFileMemoryStore<T>(
+  run: (memory: Awaited<ReturnType<typeof createMemoryStore>>, db: Awaited<ReturnType<typeof createDb>>, ws: ReturnType<typeof createWorkspace>, wsDir: string) => Promise<T>
+) {
+  const wsDir = await mkdtemp(join(tmpdir(), "company-brain-fmem-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "company-brain-fmem-db-"));
+  const db = await createDb(dbDir);
+  const ws = createWorkspace({ workspaceDir: wsDir });
+  const gitWriter = createGitWriter({ workspaceDir: wsDir });
+  try {
+    const memory = await createMemoryStore(db, { gitWriter, workspace: ws });
+    return await run(memory, db, ws, wsDir);
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+}
+
+test("file mode: saveMemory writes an entity file and the memory is recallable", async () => {
+  await withFileMemoryStore(async (memory, _db, _ws, wsDir) => {
+    const saved = await memory.saveMemory({ kind: "decision", subject: "Ada", content: "Chose files-canonical storage.", actor: "alice" });
+    assert.equal(existsSync(join(wsDir, "memory", "ada.md")), true);
+    assert.equal(saved.kind, "decision");
+
+    const recall = await memory.recall("files-canonical storage");
+    assert.equal(recall.results.some((r) => r.sourceId === saved.id), true);
+  });
+});
+
+test("file mode: two saves for the same subject append to one entity file", async () => {
+  await withFileMemoryStore(async (memory, db, ws) => {
+    await memory.saveMemory({ kind: "fact", subject: "Ada", content: "Born 1815." });
+    await memory.saveMemory({ kind: "preference", subject: "Ada", content: "Prefers async." });
+    assert.deepEqual(await ws.listEntitySlugs(), ["ada"]);
+    const ent = await db.query<{ id: string }>("select id from entities where slug = $1", ["ada"]);
+    const mems = await db.query<{ n: string }>("select count(*) as n from memories where entity_id = $1", [ent.rows[0].id]);
+    assert.equal(Number(mems.rows[0].n), 2);
+  });
+});
+
+test("file mode: forgetMemory drops the fact from active recall", async () => {
+  await withFileMemoryStore(async (memory) => {
+    const saved = await memory.saveMemory({ kind: "status", subject: "Ada", content: "Currently on leave." });
+    const forgotten = await memory.forgetMemory(saved.id);
+    assert.equal(forgotten?.status, "forgotten");
+    const recall = await memory.recall("currently on leave");
+    assert.equal(recall.results.some((r) => r.sourceId === saved.id), false);
+  });
+});
+
+test("file mode: a page source becomes a resolvable [[slug]] citation", async () => {
+  await withFileMemoryStore(async (memory, db) => {
+    await db.query(
+      "insert into pages (id, title, slug, html, plain_text, creator, created_by, updated_by) values ($1,$2,$3,$4,$5,'t','t','t')",
+      ["page-spec", "Spec", "spec", "<h1>Spec</h1>", "Spec"]
+    );
+    const saved = await memory.saveMemory({
+      kind: "decision",
+      subject: "Storage",
+      content: "Decided per the spec.",
+      sources: [{ sourceType: "page", pageId: "page-spec", pageChunkId: null, artifactId: null, sourceChunkId: null, quote: null }],
+    });
+    const src = await db.query<{ page_id: string | null }>("select page_id from memory_sources where memory_id = $1", [saved.id]);
+    assert.equal(src.rows[0]?.page_id, "page-spec");
   });
 });

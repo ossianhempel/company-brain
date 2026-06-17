@@ -97,7 +97,7 @@ const workspaceDir = resolveWorkspaceDir();
 const workspace = createWorkspace({ workspaceDir });
 const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
-const memory = await createMemoryStore(db);
+const memory = await createMemoryStore(db, { gitWriter, workspace });
 
 app.use("*", cors());
 

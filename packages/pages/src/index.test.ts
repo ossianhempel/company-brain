@@ -480,3 +480,33 @@ test("file mode (U8): version history is backed by git", async () => {
     assert.equal((await pages.listVersions(page.id))?.length, 3); // restore adds a commit
   });
 });
+
+test("file mode (U8): parentPageId and attribution survive a full reindex", async () => {
+  await withFilePageStore(async (pages, { db, workspace }) => {
+    const parent = await pages.create({ title: "Parent", html: "<h1>Parent</h1>", actor: "alice" });
+    const child = await pages.create({ title: "Child", html: "<h1>Child</h1>", actor: "alice" });
+    const moved = await pages.move(child.id, { parentPageId: parent.id, actor: "bob" });
+    assert.equal(moved?.parentPageId, parent.id); // move reaches the DB
+
+    // Rebuild the index from files alone.
+    await db.query("delete from page_links");
+    await db.query("delete from page_chunks");
+    await db.query("delete from pages");
+    await reindexAllPages(db, workspace);
+
+    const rebuilt = await pages.get(child.id);
+    assert.equal(rebuilt?.parentPageId, parent.id); // parent survived the rebuild
+    assert.equal(rebuilt?.creator, "alice"); // original creator preserved, not overwritten
+  });
+});
+
+test("file mode: getVersion attributes to the commit author, not the page owner", async () => {
+  await withFilePageStore(async (pages) => {
+    // owner differs from the actor so the assertion distinguishes the two.
+    const page = await pages.create({ title: "Owned", html: "<h1>Owned</h1><p>v1</p>", actor: "alice", owner: "carol" });
+    assert.equal(page.owner, "carol");
+    const versions = await pages.listVersions(page.id);
+    const got = await pages.getVersion(page.id, versions![0].id);
+    assert.equal(got?.createdBy, "alice"); // commit author, not the "carol" owner
+  });
+});

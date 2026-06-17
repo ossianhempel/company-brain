@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import matter from "gray-matter";
 import MarkdownIt from "markdown-it";
@@ -31,7 +31,24 @@ export interface PageFrontmatter {
   order?: number;
   visibility?: string;
   owner?: string;
+  // Persisted so the DB index is fully rebuildable from files alone.
+  creator?: string;
+  createdBy?: string;
+  updatedBy?: string;
+  parentPageId?: string | null;
+  pinnedOrder?: number | null;
+  permissionNote?: string | null;
   [key: string]: unknown;
+}
+
+/**
+ * Resolve the workspace directory the same way across server and CLI:
+ * COMPANY_BRAIN_WORKSPACE_DIR, else `<INIT_CWD|cwd>/data/workspace`.
+ */
+export function resolveWorkspaceDir(): string {
+  return process.env.COMPANY_BRAIN_WORKSPACE_DIR
+    ? resolve(process.cwd(), process.env.COMPANY_BRAIN_WORKSPACE_DIR)
+    : resolve(process.env.INIT_CWD ?? process.cwd(), "data/workspace");
 }
 
 export interface StoredPage {
@@ -46,7 +63,7 @@ const PAGES_DIR = "pages";
 // Sanitize allowlist mirrors packages/pages `prepareHtml` so the HTML boundary
 // is identical whether content arrives from the editor or is re-derived from a
 // markdown file during reindex.
-const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+export const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
   allowedTags: sanitizeHtml.defaults.allowedTags.concat(["h1", "h2", "img"]),
   allowedAttributes: {
     ...sanitizeHtml.defaults.allowedAttributes,

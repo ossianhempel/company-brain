@@ -252,6 +252,22 @@ export function createGitWriter(options: GitWriterOptions) {
     return { path: relPath, before, after };
   }
 
+  /** Author/message/timestamp for a single commit, or null if unknown. */
+  async function commitMeta(hash: string): Promise<CommitInfo | null> {
+    await ensureRepo();
+    try {
+      const { commit } = await git.readCommit({ fs, dir, oid: hash });
+      return {
+        hash,
+        message: commit.message.trim(),
+        author: { name: commit.author.name, email: commit.author.email },
+        timestamp: commit.author.timestamp,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** Content of a path as of a given commit (for restore/preview). */
   async function restore(hash: string, relPath: string): Promise<string> {
     await ensureRepo();
@@ -292,8 +308,8 @@ export function createGitWriter(options: GitWriterOptions) {
     await ensureRepo();
     const priorHead = await headOid();
 
-    if (mutation.baseVersion !== undefined && priorHead && mutation.baseVersion !== priorHead) {
-      throw new WorkspaceConflictError(mutation.baseVersion, priorHead);
+    if (mutation.baseVersion !== undefined && mutation.baseVersion !== (priorHead ?? "")) {
+      throw new WorkspaceConflictError(mutation.baseVersion, priorHead ?? "");
     }
 
     try {
@@ -328,6 +344,7 @@ export function createGitWriter(options: GitWriterOptions) {
     enqueue,
     history,
     diff,
+    commitMeta,
     restore,
     status,
     headOid,

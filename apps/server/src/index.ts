@@ -1,11 +1,10 @@
-import { resolve } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { createDb } from "@company-brain/db";
 import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writer";
-import { createWorkspace } from "@company-brain/workspace";
+import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 import { createMemoryStore } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 
@@ -94,9 +93,7 @@ const db = await createDb();
 
 // Files+git are canonical; the DB is the derived index. The server is the
 // single writer to the workspace git repo.
-const workspaceDir = process.env.COMPANY_BRAIN_WORKSPACE_DIR
-  ? resolve(process.cwd(), process.env.COMPANY_BRAIN_WORKSPACE_DIR)
-  : resolve(process.env.INIT_CWD ?? process.cwd(), "data/workspace");
+const workspaceDir = resolveWorkspaceDir();
 const workspace = createWorkspace({ workspaceDir });
 const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });

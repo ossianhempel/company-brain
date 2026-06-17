@@ -19,7 +19,7 @@ import {
   type PageVersion,
   type PageWithRelations
 } from "@company-brain/pages";
-import { createWorkspace } from "@company-brain/workspace";
+import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 
 type Flags = Record<string, string | boolean>;
 
@@ -30,12 +30,6 @@ if (cliArgs[0] === "--") {
 
 const [command, subcommand, ...rest] = cliArgs;
 const defaultApiUrl = process.env.COMPANY_BRAIN_API_URL ?? "http://localhost:3000";
-
-function resolveWorkspaceDir() {
-  return process.env.COMPANY_BRAIN_WORKSPACE_DIR
-    ? path.resolve(process.cwd(), process.env.COMPANY_BRAIN_WORKSPACE_DIR)
-    : path.resolve(process.env.INIT_CWD ?? process.cwd(), "data/workspace");
-}
 const memoryKinds = new Set(["fact", "decision", "preference", "status", "contradiction"]);
 const importExtensions = new Set([".html", ".htm", ".md", ".markdown", ".txt"]);
 const migrationTables = [
@@ -453,6 +447,11 @@ async function main() {
       await requestApi("/api/admin/reindex", { method: "POST" });
       printJson({ ok: true, mode: "api" });
       return;
+    }
+    if (flags.direct && (await canUseApi())) {
+      throw new Error(
+        "Refusing --direct reindex: the server is running and owns the workspace. Omit --direct to use the API, or stop the server first."
+      );
     }
     const db = await createDb();
     const workspace = createWorkspace({ workspaceDir: resolveWorkspaceDir() });

@@ -392,6 +392,9 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
           const cur = await ws.readAgent(slug);
           // Preserve existing frontmatter identity/config; apply the patch (lets the
           // UI set provider/model/name/enabled, not just the system-prompt body).
+          // NOTE: for a new agent `id` is absent here, but writeFileIn's ensureId
+          // generates + persists a stable id before writing (and readFileIn backfills
+          // on read), so the file's id is stable across reindex — no churn.
           const base = cur?.frontmatter ?? ({ id: undefined, title: slug } as Record<string, unknown>);
           const frontmatter: Record<string, unknown> = { ...base };
           if (patch?.name !== undefined) frontmatter.title = patch.name;

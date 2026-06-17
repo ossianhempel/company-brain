@@ -114,6 +114,16 @@ export function createWorkspace(options: WorkspaceOptions) {
     return frontmatter.id ?? randomUUID();
   }
 
+  /** Parse a raw page file string (e.g. a git blob at a past commit). */
+  function parsePage(raw: string): StoredPage {
+    const parsed = matter(raw);
+    const fm = parsed.data as Partial<PageFrontmatter>;
+    return {
+      frontmatter: { ...fm, id: ensureId(fm) } as PageFrontmatter,
+      markdown: parsed.content.trim() + "\n",
+    };
+  }
+
   /**
    * Read a page by slug. Resolves either a standalone `pages/<slug>.md` or a
    * directory page `pages/<slug>/index.md`. Returns null if neither exists.
@@ -194,6 +204,7 @@ export function createWorkspace(options: WorkspaceOptions) {
     htmlToMarkdown,
     markdownToHtml,
     sanitizePageHtml,
+    parsePage,
     readPage,
     writePage,
     deletePage,

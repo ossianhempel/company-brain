@@ -461,3 +461,22 @@ test("file mode (U7): reindex is incremental and tombstones deleted files", asyn
     assert.notEqual(row.rows[0]?.deleted_at, null);
   });
 });
+
+test("file mode (U8): version history is backed by git", async () => {
+  await withFilePageStore(async (pages) => {
+    const page = await pages.create({ title: "Versioned", html: "<h1>Versioned</h1><p>v1</p>", actor: "a" });
+    await pages.update(page.id, { html: "<h1>Versioned</h1><p>v2</p>", actor: "b" });
+
+    const versions = await pages.listVersions(page.id);
+    assert.equal(versions?.length, 2); // create + update commits
+    assert.equal(versions?.[0].createdBy, "b"); // newest first
+
+    const oldest = versions![versions!.length - 1];
+    const got = await pages.getVersion(page.id, oldest.id);
+    assert.match(got!.html, /v1/);
+
+    const restored = await pages.restoreVersion(page.id, oldest.id, "a");
+    assert.match(restored!.html, /v1/);
+    assert.equal((await pages.listVersions(page.id))?.length, 3); // restore adds a commit
+  });
+});

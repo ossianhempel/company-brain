@@ -1488,6 +1488,21 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
         return null;
       }
 
+      // File mode: history is git. Version id = commit hash.
+      if (fileMode) {
+        const commits = await gitWriter!.history(workspace!.pageFilePath(page.slug));
+        return commits.map<PageVersion>((c) => ({
+          id: c.hash,
+          pageId: id,
+          title: page.title,
+          slug: page.slug,
+          html: "",
+          plainText: "",
+          createdBy: c.author.name,
+          createdAt: new Date(c.timestamp * 1000).toISOString(),
+        }));
+      }
+
       const result = await pageDb.query<PageVersionRow>(
         `
           select *
@@ -1501,6 +1516,30 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     },
 
     async getVersion(id: string, versionId: string) {
+      // File mode: read the page file as of the commit and re-derive HTML.
+      if (fileMode) {
+        const page = await this.get(id);
+        if (!page) return null;
+        let raw: string;
+        try {
+          raw = await gitWriter!.restore(versionId, workspace!.pageFilePath(page.slug));
+        } catch {
+          return null;
+        }
+        const stored = workspace!.parsePage(raw);
+        const html = workspace!.sanitizePageHtml(workspace!.markdownToHtml(stored.markdown));
+        return {
+          id: versionId,
+          pageId: id,
+          title: stored.frontmatter.title,
+          slug: page.slug,
+          html,
+          plainText: stripHtml(html),
+          createdBy: stored.frontmatter.owner ?? "unknown",
+          createdAt: stored.frontmatter.updated ?? new Date().toISOString(),
+        } satisfies PageVersion;
+      }
+
       const result = await pageDb.query<PageVersionRow>(
         `
           select *

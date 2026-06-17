@@ -20,6 +20,9 @@ importers:
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@company-brain/git-writer':
+        specifier: workspace:*
+        version: link:../../packages/git-writer
       '@company-brain/memory':
         specifier: workspace:*
         version: link:../../packages/memory

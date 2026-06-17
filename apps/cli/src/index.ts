@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { readdir, readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import { createGitWriter } from "@company-brain/git-writer";
 import {
   createMemoryStore,
   type MemoryKind,
@@ -28,6 +30,12 @@ if (cliArgs[0] === "--") {
 
 const [command, subcommand, ...rest] = cliArgs;
 const defaultApiUrl = process.env.COMPANY_BRAIN_API_URL ?? "http://localhost:3000";
+
+function resolveWorkspaceDir() {
+  return process.env.COMPANY_BRAIN_WORKSPACE_DIR
+    ? path.resolve(process.cwd(), process.env.COMPANY_BRAIN_WORKSPACE_DIR)
+    : path.resolve(process.env.INIT_CWD ?? process.cwd(), "data/workspace");
+}
 const memoryKinds = new Set(["fact", "decision", "preference", "status", "contradiction"]);
 const importExtensions = new Set([".html", ".htm", ".md", ".markdown", ".txt"]);
 const migrationTables = [
@@ -373,6 +381,23 @@ async function main() {
   if (command === "doctor") {
     const { flags } = parseFlags([subcommand, ...rest].filter(Boolean));
     const useApi = !flags.direct && (await canUseApi());
+
+    // Inspect the local workspace git repo + file count (files are canonical).
+    const workspaceDir = resolveWorkspaceDir();
+    let workspaceCheck = "missing";
+    let uncommitted = 0;
+    let fileCount = 0;
+    if (existsSync(path.join(workspaceDir, ".git"))) {
+      try {
+        const status = await createGitWriter({ workspaceDir }).status();
+        workspaceCheck = status.clean ? "clean" : "dirty";
+        uncommitted = status.changed.length;
+        fileCount = (await createWorkspace({ workspaceDir }).listPageSlugs()).length;
+      } catch {
+        workspaceCheck = "error";
+      }
+    }
+
     if (!useApi && !flags.direct) {
       printJson({
         ok: false,
@@ -380,7 +405,9 @@ async function main() {
           api: "not-running",
           database: "not-checked",
           homePage: "not-checked",
-          pageCount: 0
+          pageCount: 0,
+          workspace: workspaceCheck,
+          uncommitted
         }
       });
       return;
@@ -394,7 +421,11 @@ async function main() {
         api: useApi ? "ok" : "not-running",
         database: useApi ? "via-api" : "ok",
         homePage: home ? "ok" : "missing",
-        pageCount: allPages.length
+        pageCount: allPages.length,
+        workspace: workspaceCheck,
+        uncommitted,
+        // index is fresh when the live page count matches the file count
+        indexFresh: workspaceCheck === "missing" ? "n/a" : allPages.length === fileCount
       }
     });
     return;
@@ -424,10 +455,7 @@ async function main() {
       return;
     }
     const db = await createDb();
-    const workspaceDir = process.env.COMPANY_BRAIN_WORKSPACE_DIR
-      ? path.resolve(process.cwd(), process.env.COMPANY_BRAIN_WORKSPACE_DIR)
-      : path.resolve(process.env.INIT_CWD ?? process.cwd(), "data/workspace");
-    const workspace = createWorkspace({ workspaceDir });
+    const workspace = createWorkspace({ workspaceDir: resolveWorkspaceDir() });
     await reindexAllPages(db, workspace);
     await db.close();
     printJson({ ok: true, mode: "direct" });
@@ -453,6 +481,15 @@ async function main() {
   const useApi = !flags.direct && (await canUseApi());
   if (!useApi && !flags.direct) {
     throw new Error("Company Brain API is not reachable. Start `pnpm dev` or pass --direct for local PGlite access.");
+  }
+
+  // Files+git are canonical and the server is the single writer. A --direct
+  // write while the server is up would race the workspace git lock, so demote.
+  const writeSubcommands = new Set(["create", "update", "duplicate", "move", "delete", "restore"]);
+  if (flags.direct && writeSubcommands.has(subcommand ?? "") && (await canUseApi())) {
+    throw new Error(
+      "Refusing --direct write: the server is running and owns the workspace. Omit --direct to use the API, or stop the server first."
+    );
   }
 
   if (subcommand === "list") {

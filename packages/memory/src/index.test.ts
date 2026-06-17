@@ -326,3 +326,23 @@ test("file mode: a page source becomes a resolvable [[slug]] citation", async ()
     assert.equal(src.rows[0]?.page_id, "page-spec");
   });
 });
+
+// --- U6: entities/profiles surfaces -----------------------------------------
+
+test("U6: listEntities and getProfile expose the derived entities", async () => {
+  await withEntityIndex(async (db, ws) => {
+    await writeEntityDoc(ws, "ada", baseDoc({ facts: [newFact({ kind: "fact", content: "Born 1815.", date: "2026-06-17", id: "f1" })] }));
+    await reindexEntities(db, ws, ["ada"]);
+    const store = await createMemoryStore(db);
+
+    const entities = await store.listEntities();
+    assert.equal(entities.some((e) => e.slug === "ada" && e.title === "Ada"), true);
+
+    const profile = await store.getProfile("ada");
+    assert.equal(profile?.entity.profile, "Lead.");
+    assert.equal(profile?.memories.length, 1);
+    assert.equal(profile?.memories[0].id, "f1");
+
+    assert.equal(await store.getProfile("does-not-exist"), null);
+  });
+});

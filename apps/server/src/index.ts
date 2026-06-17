@@ -195,6 +195,19 @@ app.get("/api/memories/:id", async (c) => {
   return c.json({ memory: savedMemory });
 });
 
+app.get("/api/entities", async (c) => {
+  const type = c.req.query("type") || undefined;
+  return c.json({ entities: await memory.listEntities({ type }) });
+});
+
+app.get("/api/entities/:slug", async (c) => {
+  const profile = await memory.getProfile(c.req.param("slug"));
+  if (!profile) {
+    return c.json({ error: "Entity not found" }, 404);
+  }
+  return c.json(profile);
+});
+
 app.post("/api/memories/:id/forget", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
   const savedMemory = await memory.forgetMemory(c.req.param("id"), body.actor);

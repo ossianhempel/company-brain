@@ -78,6 +78,23 @@ export type MemoryWithSources = Memory & {
   sources: MemorySource[];
 };
 
+export type Entity = {
+  id: string;
+  slug: string;
+  title: string;
+  type: string;
+  profile: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** An entity plus its active (atomized) memories — the "profile" view. */
+export type EntityProfile = {
+  entity: Entity;
+  memories: MemoryWithSources[];
+};
+
 export type RecallResult = {
   type: "memory" | "page_chunk" | "source_chunk";
   id: string;
@@ -180,6 +197,37 @@ function toMemory(row: MemoryRow): Memory {
     updatedAt: normalizeTimestamp(row.updated_at),
     forgottenAt: row.forgotten_at ? normalizeTimestamp(row.forgotten_at) : null,
     supersededByMemoryId: row.superseded_by_memory_id
+  };
+}
+
+type EntityRow = {
+  id: string;
+  slug: string;
+  title: string;
+  type: string;
+  profile: string;
+  tags_json: string;
+  created_at: string;
+  updated_at: string;
+};
+
+function toEntity(row: EntityRow): Entity {
+  let tags: string[] = [];
+  try {
+    const parsed = JSON.parse(row.tags_json);
+    if (Array.isArray(parsed)) tags = parsed;
+  } catch {
+    /* leave empty */
+  }
+  return {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    type: row.type,
+    profile: row.profile,
+    tags,
+    createdAt: normalizeTimestamp(row.created_at),
+    updatedAt: normalizeTimestamp(row.updated_at),
   };
 }
 
@@ -819,6 +867,34 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
             ? rankWithLexical(candidates, terms, safeLimit)
             : rankWithBm25(candidates, terms, safeLimit)
       };
+    },
+
+    async listEntities(input?: { type?: string }): Promise<Entity[]> {
+      const where = input?.type ? "where deleted_at is null and type = $1" : "where deleted_at is null";
+      const params = input?.type ? [input.type] : [];
+      const result = await memoryDb.query<EntityRow>(
+        `select * from entities ${where} order by title asc`,
+        params
+      );
+      return result.rows.map(toEntity);
+    },
+
+    async getProfile(slug: string): Promise<EntityProfile | null> {
+      const result = await memoryDb.query<EntityRow>(
+        "select * from entities where slug = $1 and deleted_at is null",
+        [slug]
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const mems = await memoryDb.query<MemoryRow>(
+        "select * from memories where entity_id = $1 and status = 'active' order by updated_at desc",
+        [row.id]
+      );
+      const memories: MemoryWithSources[] = [];
+      for (const m of mems.rows) {
+        memories.push({ ...toMemory(m), sources: await sourcesForMemory(m.id) });
+      }
+      return { entity: toEntity(row), memories };
     }
   };
 }

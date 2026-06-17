@@ -990,6 +990,30 @@ async function handleMemoryCommand(subcommand: string | undefined, rest: string[
     return;
   }
 
+  if (subcommand === "entities") {
+    const type = flagString(flags, "type");
+    const entities = useApi
+      ? (await requestApi<{ entities: unknown[] }>(`/api/entities${type ? `?type=${encodeURIComponent(type)}` : ""}`)).entities
+      : await (await createMemoryStore()).listEntities(type ? { type } : undefined);
+    printJson({ entities });
+    return;
+  }
+
+  if (subcommand === "profile") {
+    const slug = positionals[0];
+    if (!slug) {
+      throw new Error("memory profile requires <entity-slug>");
+    }
+    const profile = useApi
+      ? await requestApi<unknown>(`/api/entities/${encodeURIComponent(slug)}`)
+      : await (await createMemoryStore()).getProfile(slug);
+    if (!profile) {
+      throw new Error(`Entity not found: ${slug}`);
+    }
+    printJson(profile);
+    return;
+  }
+
   if (subcommand === "forget") {
     const id = positionals[0];
     if (!id) {

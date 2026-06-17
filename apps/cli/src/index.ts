@@ -1065,7 +1065,26 @@ async function handleConversationsCommand(subcommand: string | undefined, rest: 
     printJson({ conversation });
     return;
   }
-  throw new Error(`Unknown conversations subcommand: ${subcommand ?? "(none)"}. Try: list [--status --agent], show <id>`);
+  if (subcommand === "archive") {
+    const id = positionals[0];
+    if (!id) throw new Error("conversations archive requires <id>");
+    const actor = flagString(flags, "actor") ?? "cli";
+    if (flags.direct && (await canUseApi())) {
+      throw new Error("Refusing --direct archive: the server is running and owns the workspace. Omit --direct, or stop the server first.");
+    }
+    const conversation = useApi
+      ? (
+          await requestApi<{ conversation: unknown }>(`/api/conversations/${encodeURIComponent(id)}/archive`, {
+            method: "POST",
+            body: JSON.stringify({ actor })
+          })
+        ).conversation
+      : await (await directAgentStore()).archiveConversation(id, actor);
+    if (!conversation) throw new Error(`Conversation not found: ${id}`);
+    printJson({ conversation });
+    return;
+  }
+  throw new Error(`Unknown conversations subcommand: ${subcommand ?? "(none)"}. Try: list [--status --agent], show <id>, archive <id>`);
 }
 
 async function handleProvidersCommand(rest: string[]) {

@@ -256,6 +256,13 @@ app.get("/api/conversations/:id", async (c) => {
   return c.json({ conversation });
 });
 
+app.post("/api/conversations/:id/archive", async (c) => {
+  const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
+  const conversation = await agents.archiveConversation(c.req.param("id"), body.actor);
+  if (!conversation) return c.json({ error: "Conversation not found" }, 404);
+  return c.json({ conversation });
+});
+
 app.get("/api/providers", async (c) => {
   return c.json({ providers: await providers.detectAll() });
 });

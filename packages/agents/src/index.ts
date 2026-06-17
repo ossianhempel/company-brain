@@ -444,6 +444,35 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       return { ...toConversation(row), turns };
     },
 
+    /**
+     * Archive a conversation: a single status→archived lifecycle edit to its
+     * transcript file, through the single writer → reindex. The only
+     * post-completion edit to a transcript (otherwise write-once). Idempotent;
+     * null if the conversation file is missing.
+     */
+    async archiveConversation(id: string, actor = "system"): Promise<Conversation | null> {
+      if (!fileMode) throw new Error("Archiving conversations requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      const stored = await ws.readConversation(id);
+      if (!stored) return null;
+      const doc = parseConversation(stored);
+      if (doc.status !== "archived") {
+        await gitWriter!.enqueue({
+          paths: [ws.conversationFilePath(id)],
+          message: `conversation: archive ${id}`,
+          actor: { name: actor },
+          write: async () => {
+            const cur = await ws.readConversation(id);
+            if (!cur) return;
+            const fresh = buildConversationFile({ ...parseConversation(cur), status: "archived" });
+            await ws.writeConversation(id, { frontmatter: fresh.frontmatter, markdown: fresh.markdown }, new Date().toISOString());
+          },
+        });
+      }
+      const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1", [id]);
+      return result.rows[0] ? toConversation(result.rows[0]) : null;
+    },
+
     /** Write a conversation transcript once (the finalized run) through the writer. */
     async saveConversation(doc: ConversationDoc, actor = "system"): Promise<Conversation | null> {
       if (!fileMode) throw new Error("Saving conversations requires file mode (gitWriter + workspace).");

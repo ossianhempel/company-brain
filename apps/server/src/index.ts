@@ -121,7 +121,12 @@ const scheduler = createScheduler({
   workspaceDir,
   reindex: () => reindexAllAgentAreas(db, workspace),
 });
-if (process.env.COMPANY_BRAIN_DISABLE_SCHEDULER !== "1") {
+// The scheduler runs jobs/heartbeats via local agent CLIs (host execution) and
+// would execute personas/jobs derived from files that any writer can change
+// (the API is unauthenticated until Phase 5). So it is OFF BY DEFAULT — operators
+// opt in with COMPANY_BRAIN_ENABLE_SCHEDULER=1. With this and the off-by-default
+// run API, no automatic host execution happens unless the operator enables it.
+if (process.env.COMPANY_BRAIN_ENABLE_SCHEDULER === "1") {
   await scheduler.start();
 }
 
@@ -177,6 +182,9 @@ app.get("/api/agents/:slug/file", async (c) => {
   return c.json(file);
 });
 
+// Editing a persona is an ordinary content write (like a page) — it does not by
+// itself execute anything. Host execution only happens via the opt-in scheduler
+// or the opt-in run API. Authn/RBAC for all writes is Phase 5.
 app.put("/api/agents/:slug/file", async (c) => {
   const body = z.object({ markdown: z.string(), actor: z.string().min(1).optional() }).parse(await c.req.json());
   const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor);

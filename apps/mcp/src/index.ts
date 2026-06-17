@@ -296,6 +296,41 @@ server.registerTool(
 );
 
 server.registerTool(
+  "company_brain_list_entities",
+  {
+    title: "List Entities",
+    description:
+      "List the brain's entities (people, teams, projects, repos, topics) — the subjects memory is organized around. Optionally filter by type.",
+    inputSchema: {
+      type: z.string().optional().describe("Optional entity type filter (e.g. person, team, project, repo, topic).")
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ type }) => {
+    const params = new URLSearchParams();
+    if (type) params.set("type", type);
+    const query = params.toString();
+    return toolResult(await requestApi<{ entities: unknown[] }>(`/api/entities${query ? `?${query}` : ""}`));
+  }
+);
+
+server.registerTool(
+  "company_brain_get_profile",
+  {
+    title: "Get Entity Profile",
+    description:
+      "Get an entity's profile — its compiled-truth summary plus active memories — by slug. Use company_brain_list_entities to find slugs.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Entity slug.")
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ slug }) => {
+    return toolResult(await requestApi<{ entity: unknown; memories: unknown[] }>(`/api/entities/${encodeURIComponent(slug)}`));
+  }
+);
+
+server.registerTool(
   "company_brain_ingest_source_artifact",
   {
     title: "Ingest Company Brain Source Artifact",

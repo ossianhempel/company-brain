@@ -1,5 +1,30 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import type { GitWriter } from "@company-brain/git-writer";
+import type { Workspace } from "@company-brain/workspace";
+import {
+  parseEntity,
+  buildEntityFile,
+  newFact,
+  appendFact,
+  setFactStatus,
+  type EntityDoc,
+} from "./entity-file.ts";
+
+/** Options enabling file-canonical memory: writes go to entity files + git. */
+export interface MemoryStoreOptions {
+  gitWriter?: GitWriter;
+  workspace?: Workspace;
+}
+
+function slugifyMemory(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "general"
+  );
+}
 
 export type SourceArtifact = {
   id: string;
@@ -51,6 +76,23 @@ export type Memory = {
 
 export type MemoryWithSources = Memory & {
   sources: MemorySource[];
+};
+
+export type Entity = {
+  id: string;
+  slug: string;
+  title: string;
+  type: string;
+  profile: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** An entity plus its active (atomized) memories — the "profile" view. */
+export type EntityProfile = {
+  entity: Entity;
+  memories: MemoryWithSources[];
 };
 
 export type RecallResult = {
@@ -155,6 +197,37 @@ function toMemory(row: MemoryRow): Memory {
     updatedAt: normalizeTimestamp(row.updated_at),
     forgottenAt: row.forgotten_at ? normalizeTimestamp(row.forgotten_at) : null,
     supersededByMemoryId: row.superseded_by_memory_id
+  };
+}
+
+type EntityRow = {
+  id: string;
+  slug: string;
+  title: string;
+  type: string;
+  profile: string;
+  tags_json: string;
+  created_at: string;
+  updated_at: string;
+};
+
+function toEntity(row: EntityRow): Entity {
+  let tags: string[] = [];
+  try {
+    const parsed = JSON.parse(row.tags_json);
+    if (Array.isArray(parsed)) tags = parsed;
+  } catch {
+    /* leave empty */
+  }
+  return {
+    id: row.id,
+    slug: row.slug,
+    title: row.title,
+    type: row.type,
+    profile: row.profile,
+    tags,
+    createdAt: normalizeTimestamp(row.created_at),
+    updatedAt: normalizeTimestamp(row.updated_at),
   };
 }
 
@@ -316,8 +389,162 @@ function rankWithBm25(candidates: RecallCandidate[], terms: string[], limit: num
     .map(({ searchText: _searchText, lexicalBoost: _lexicalBoost, ...result }) => result);
 }
 
-export async function createMemoryStore(db?: CompanyBrainDb) {
+async function tombstoneEntityBySlug(db: CompanyBrainDb, slug: string): Promise<void> {
+  const row = await db.query<{ id: string }>(
+    "select id from entities where slug = $1 and deleted_at is null",
+    [slug]
+  );
+  const id = row.rows[0]?.id;
+  if (!id) return;
+  await db.query("delete from memories where entity_id = $1", [id]); // cascades memory_sources
+  await db.query("update entities set deleted_at = now() where id = $1", [id]);
+}
+
+/**
+ * Rebuild the derived index for entity files at the given slugs (the single
+ * memory index writer — mirrors reindexPages). A missing file tombstones the
+ * entity and drops its atomized memories. Incremental via content_hash.
+ */
+export async function reindexEntities(
+  db: CompanyBrainDb,
+  workspace: Workspace,
+  slugs: string[]
+): Promise<void> {
+  for (const slug of slugs) {
+    const stored = await workspace.readEntity(slug);
+    if (!stored) {
+      await tombstoneEntityBySlug(db, slug);
+      continue;
+    }
+
+    const hash = createHash("sha256")
+      .update(JSON.stringify(stored.frontmatter))
+      .update("\n")
+      .update(stored.markdown)
+      .digest("hex");
+    const doc = parseEntity(stored);
+    const existing = await db.query<{ content_hash: string | null; slug: string }>(
+      "select content_hash, slug from entities where id = $1 and deleted_at is null",
+      [doc.id]
+    );
+    // Skip only when both the body AND the slug are unchanged. content_hash
+    // excludes the path-derived slug, so a move (same body, new slug) must still
+    // reindex — otherwise the old slug is tombstoned as missing and the entity
+    // vanishes from the derived index even though the file still exists.
+    if (existing.rows[0]?.content_hash === hash && existing.rows[0]?.slug === slug) continue;
+
+    // A slug maps to one live entity (one file). If a different live row holds
+    // this slug (e.g. the file was recreated with a new id), tombstone it and
+    // drop its memories first, so the live-only unique slug index won't collide.
+    await db.query(
+      "delete from memories where entity_id in (select id from entities where slug = $1 and id <> $2 and deleted_at is null)",
+      [slug, doc.id]
+    );
+    await db.query(
+      "update entities set deleted_at = now() where slug = $1 and id <> $2 and deleted_at is null",
+      [slug, doc.id]
+    );
+
+    // content_hash is written LAST (after the children rebuild) so a crash mid-
+    // reindex leaves it null and the file is re-indexed next time, never skipped.
+    await db.query(
+      `
+        insert into entities (id, slug, title, type, profile, tags_json, content_hash)
+        values ($1, $2, $3, $4, $5, $6, null)
+        on conflict (id) do update set
+          slug = excluded.slug,
+          title = excluded.title,
+          type = excluded.type,
+          profile = excluded.profile,
+          tags_json = excluded.tags_json,
+          content_hash = null,
+          updated_at = now(),
+          deleted_at = null
+      `,
+      [doc.id, slug, doc.title, doc.type, doc.profile, JSON.stringify(doc.tags)]
+    );
+
+    // Re-atomize the entity's facts into the derived memories index.
+    await db.query("delete from memories where entity_id = $1", [doc.id]);
+    for (const fact of doc.facts) {
+      await db.query(
+        `
+          insert into memories (id, kind, content, subject, status, confidence, created_by, entity_id)
+          values ($1, $2, $3, $4, $5, $6, 'system', $7)
+        `,
+        [fact.id, fact.kind, fact.content, doc.title, fact.status, fact.confidence, doc.id]
+      );
+      // Authoritative structured citations (artifact/manual/chunk/page + quotes),
+      // round-tripped from the fact. Page sources carry a stable page id, so they
+      // survive a page rename without slug re-resolution.
+      const coveredPageIds = new Set<string>();
+      for (const s of fact.sources) {
+        if (s.sourceType === "page" && s.pageId) coveredPageIds.add(s.pageId);
+        await db.query(
+          `
+            insert into memory_sources (id, memory_id, source_type, page_id, page_chunk_id, artifact_id, source_chunk_id, quote)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
+          `,
+          [randomUUID(), fact.id, s.sourceType, s.pageId ?? null, s.pageChunkId ?? null, s.artifactId ?? null, s.sourceChunkId ?? null, s.quote ?? null]
+        );
+      }
+      // Human-added [[slug]] page links not already covered by a structured
+      // source. Resolved by slug (caveat: a slug-only link won't re-resolve after
+      // the cited page is renamed — rename-reference rewrite is a follow-up).
+      for (const citeSlug of fact.citations) {
+        const page = await db.query<{ id: string }>(
+          "select id from pages where slug = $1 and deleted_at is null",
+          [citeSlug]
+        );
+        const pageId = page.rows[0]?.id ?? null;
+        if (pageId && coveredPageIds.has(pageId)) continue; // already represented
+        await db.query(
+          `
+            insert into memory_sources (id, memory_id, source_type, page_id, quote)
+            values ($1, $2, 'page', $3, null)
+          `,
+          [randomUUID(), fact.id, pageId]
+        );
+      }
+    }
+
+    // Children are rebuilt — now mark the hash so future reindexes can skip.
+    await db.query("update entities set content_hash = $2 where id = $1", [doc.id, hash]);
+  }
+}
+
+/** Rebuild the entire entity index from every entity file on disk. */
+export async function reindexAllEntities(db: CompanyBrainDb, workspace: Workspace): Promise<void> {
+  const slugs = await workspace.listEntitySlugs();
+  await reindexEntities(db, workspace, slugs);
+
+  const onDisk = new Set(slugs);
+  const live = await db.query<{ slug: string }>("select slug from entities where deleted_at is null");
+  for (const { slug } of live.rows) {
+    if (!onDisk.has(slug)) await tombstoneEntityBySlug(db, slug);
+  }
+}
+
+export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreOptions) {
   const memoryDb = db ?? (await createDb());
+  const gitWriter = opts?.gitWriter;
+  const workspace = opts?.workspace;
+  const fileMode = Boolean(gitWriter && workspace);
+
+  // Reindex memory-area commits inside the git writer's serialized hook, so the
+  // derived index update is atomic with the commit (mirrors the pages hook).
+  if (fileMode) {
+    gitWriter!.addCommitHook(async ({ paths }) => {
+      const slugs = [
+        ...new Set(
+          paths
+            .filter((p) => workspace!.pathArea(p) === "memory")
+            .map((p) => workspace!.slugFromPath(p))
+        ),
+      ];
+      if (slugs.length) await reindexEntities(memoryDb, workspace!, slugs);
+    });
+  }
 
   async function sourcesForMemory(memoryId: string) {
     const result = await memoryDb.query<MemorySourceRow>("select * from memory_sources where memory_id = $1", [
@@ -347,6 +574,45 @@ export async function createMemoryStore(db?: CompanyBrainDb) {
         ]
       );
     }
+  }
+
+  async function loadMemory(id: string): Promise<MemoryWithSources | null> {
+    const result = await memoryDb.query<MemoryRow>("select * from memories where id = $1", [id]);
+    const row = result.rows[0];
+    return row ? { ...toMemory(row), sources: await sourcesForMemory(row.id) } : null;
+  }
+
+  async function loadProfile(slug: string): Promise<EntityProfile | null> {
+    const result = await memoryDb.query<EntityRow>(
+      "select * from entities where slug = $1 and deleted_at is null",
+      [slug]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const mems = await memoryDb.query<MemoryRow>(
+      "select * from memories where entity_id = $1 and status = 'active' order by updated_at desc",
+      [row.id]
+    );
+    const memories: MemoryWithSources[] = [];
+    for (const m of mems.rows) {
+      memories.push({ ...toMemory(m), sources: await sourcesForMemory(m.id) });
+    }
+    return { entity: toEntity(row), memories };
+  }
+
+  /** Page slugs to embed as [[wiki-links]] from page-typed sources (file mode). */
+  async function pageSlugsFromSources(
+    sources: Array<Omit<MemorySource, "id" | "memoryId">>
+  ): Promise<string[]> {
+    const slugs: string[] = [];
+    for (const source of sources) {
+      if (source.sourceType === "page" && source.pageId) {
+        const r = await memoryDb.query<{ slug: string }>("select slug from pages where id = $1", [source.pageId]);
+        const slug = r.rows[0]?.slug;
+        if (slug && !slugs.includes(slug)) slugs.push(slug);
+      }
+    }
+    return slugs;
   }
 
   return {
@@ -403,8 +669,45 @@ export async function createMemoryStore(db?: CompanyBrainDb) {
       actor?: string;
       sources?: Array<Omit<MemorySource, "id" | "memoryId">>;
     }) {
-      const id = randomUUID();
       const actor = input.actor ?? "local-user";
+
+      // File-first: append the fact to the subject's entity file; the commit
+      // hook reindexes it into the derived memories row. Page-typed sources
+      // become [[slug]] citations in the fact content.
+      if (fileMode) {
+        const ws = workspace!;
+        const subject = input.subject?.trim() || "General";
+        const slug = slugifyMemory(subject);
+        const date = new Date().toISOString().slice(0, 10);
+        let content = input.content.trim();
+        for (const ps of await pageSlugsFromSources(input.sources ?? [])) {
+          if (!content.includes(`[[${ps}]]`)) content += ` [[${ps}]]`;
+        }
+        // Carry the full structured sources on the fact so they round-trip
+        // through reindex (page links also show inline as [[slug]] above).
+        const fact = newFact({ kind: input.kind, content, date, confidence: input.confidence, sources: input.sources ?? [] });
+        await gitWriter!.enqueue({
+          paths: [ws.entityFilePath(slug)],
+          message: `memory: ${slug}`,
+          actor: { name: actor },
+          write: async () => {
+            // Read-modify-write inside the queue so concurrent appends don't clobber.
+            const cur = await ws.readEntity(slug);
+            const doc: EntityDoc = cur
+              ? parseEntity(cur)
+              : { id: randomUUID(), title: subject, type: "topic", tags: [], profile: "", facts: [] };
+            const file = buildEntityFile(appendFact(doc, fact));
+            await ws.writeEntity(
+              slug,
+              { frontmatter: file.frontmatter, markdown: file.markdown },
+              new Date().toISOString()
+            );
+          },
+        });
+        return (await loadMemory(fact.id))!;
+      }
+
+      const id = randomUUID();
       const result = await memoryDb.query<MemoryRow>(
         `
           insert into memories (id, kind, content, subject, confidence, created_by)
@@ -418,6 +721,37 @@ export async function createMemoryStore(db?: CompanyBrainDb) {
     },
 
     async forgetMemory(id: string, _actor = "local-user") {
+      // File-first: mark the fact forgotten in its entity file; the commit hook
+      // reindexes it (recall loads only active memories).
+      if (fileMode) {
+        const ws = workspace!;
+        const owner = await memoryDb.query<{ entity_id: string | null }>(
+          "select entity_id from memories where id = $1 and status <> 'forgotten'",
+          [id]
+        );
+        const entityId = owner.rows[0]?.entity_id;
+        if (!entityId) return null;
+        const ent = await memoryDb.query<{ slug: string }>("select slug from entities where id = $1", [entityId]);
+        const slug = ent.rows[0]?.slug;
+        if (!slug) return null;
+        await gitWriter!.enqueue({
+          paths: [ws.entityFilePath(slug)],
+          message: `memory: forget ${id}`,
+          actor: { name: _actor },
+          write: async () => {
+            const cur = await ws.readEntity(slug);
+            if (!cur) return;
+            const file = buildEntityFile(setFactStatus(parseEntity(cur), id, "forgotten"));
+            await ws.writeEntity(
+              slug,
+              { frontmatter: file.frontmatter, markdown: file.markdown },
+              new Date().toISOString()
+            );
+          },
+        });
+        return await loadMemory(id);
+      }
+
       const result = await memoryDb.query<MemoryRow>(
         `
           update memories
@@ -593,6 +927,49 @@ export async function createMemoryStore(db?: CompanyBrainDb) {
             ? rankWithLexical(candidates, terms, safeLimit)
             : rankWithBm25(candidates, terms, safeLimit)
       };
+    },
+
+    async listEntities(input?: { type?: string }): Promise<Entity[]> {
+      const where = input?.type ? "where deleted_at is null and type = $1" : "where deleted_at is null";
+      const params = input?.type ? [input.type] : [];
+      const result = await memoryDb.query<EntityRow>(
+        `select * from entities ${where} order by title asc`,
+        params
+      );
+      return result.rows.map(toEntity);
+    },
+
+    async getProfile(slug: string): Promise<EntityProfile | null> {
+      return loadProfile(slug);
+    },
+
+    /** The raw entity file (markdown body) for editing in the workspace UI. */
+    async getEntityFile(slug: string): Promise<{ slug: string; title: string; markdown: string } | null> {
+      if (!fileMode) return null;
+      const stored = await workspace!.readEntity(slug);
+      if (!stored) return null;
+      return { slug, title: stored.frontmatter.title, markdown: stored.markdown };
+    },
+
+    /**
+     * Save a raw human edit of an entity file through the single writer; the
+     * commit hook reindexes it (so a Summary edit updates the profile). The same
+     * commit→reindex path agents use — one shared workspace.
+     */
+    async saveEntityFile(slug: string, markdown: string, actor = "local-user"): Promise<EntityProfile | null> {
+      if (!fileMode) throw new Error("Editing entity files requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      await gitWriter!.enqueue({
+        paths: [ws.entityFilePath(slug)],
+        message: `memory: edit ${slug}`,
+        actor: { name: actor },
+        write: async () => {
+          const cur = await ws.readEntity(slug);
+          const frontmatter = cur?.frontmatter ?? { id: randomUUID(), title: slug, type: "topic", tags: [] };
+          await ws.writeEntity(slug, { frontmatter, markdown }, new Date().toISOString());
+        },
+      });
+      return loadProfile(slug);
     }
   };
 }

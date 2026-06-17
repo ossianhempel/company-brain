@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createDb } from "@company-brain/db";
 import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writer";
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
-import { createMemoryStore } from "@company-brain/memory";
+import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 
 const pageInput = z.object({
@@ -97,7 +97,7 @@ const workspaceDir = resolveWorkspaceDir();
 const workspace = createWorkspace({ workspaceDir });
 const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
-const memory = await createMemoryStore(db);
+const memory = await createMemoryStore(db, { gitWriter, workspace });
 
 app.use("*", cors());
 
@@ -117,6 +117,7 @@ app.get("/health", (c) => {
 // Rebuild the derived index from the workspace files (admin/recovery).
 app.post("/api/admin/reindex", async (c) => {
   await reindexAllPages(db, workspace);
+  await reindexAllEntities(db, workspace);
   return c.json({ ok: true });
 });
 
@@ -193,6 +194,35 @@ app.get("/api/memories/:id", async (c) => {
   }
 
   return c.json({ memory: savedMemory });
+});
+
+app.get("/api/entities", async (c) => {
+  const type = c.req.query("type") || undefined;
+  return c.json({ entities: await memory.listEntities({ type }) });
+});
+
+app.get("/api/entities/:slug", async (c) => {
+  const profile = await memory.getProfile(c.req.param("slug"));
+  if (!profile) {
+    return c.json({ error: "Entity not found" }, 404);
+  }
+  return c.json(profile);
+});
+
+app.get("/api/entities/:slug/file", async (c) => {
+  const file = await memory.getEntityFile(c.req.param("slug"));
+  if (!file) {
+    return c.json({ error: "Entity file not found" }, 404);
+  }
+  return c.json(file);
+});
+
+app.put("/api/entities/:slug/file", async (c) => {
+  const body = z
+    .object({ markdown: z.string(), actor: z.string().min(1).optional() })
+    .parse(await c.req.json());
+  const profile = await memory.saveEntityFile(c.req.param("slug"), body.markdown, body.actor);
+  return c.json(profile);
 });
 
 app.post("/api/memories/:id/forget", async (c) => {

@@ -6,6 +6,7 @@ import { createDb, type CompanyBrainDb } from "@company-brain/db";
 import { createGitWriter } from "@company-brain/git-writer";
 import {
   createMemoryStore,
+  reindexAllEntities,
   type MemoryKind,
   type MemorySource,
   type RecallResponse,
@@ -43,6 +44,7 @@ const migrationTables = [
   "source_artifacts",
   "source_chunks",
   "page_source_artifacts",
+  "entities",
   "memories",
   "memory_sources"
 ];
@@ -469,6 +471,7 @@ async function main() {
     const db = await createDb();
     const workspace = createWorkspace({ workspaceDir: resolveWorkspaceDir() });
     await reindexAllPages(db, workspace);
+    await reindexAllEntities(db, workspace);
     await db.close();
     printJson({ ok: true, mode: "direct" });
     return;
@@ -987,6 +990,30 @@ async function handleMemoryCommand(subcommand: string | undefined, rest: string[
         );
       }
     }
+    return;
+  }
+
+  if (subcommand === "entities") {
+    const type = flagString(flags, "type");
+    const entities = useApi
+      ? (await requestApi<{ entities: unknown[] }>(`/api/entities${type ? `?type=${encodeURIComponent(type)}` : ""}`)).entities
+      : await (await createMemoryStore()).listEntities(type ? { type } : undefined);
+    printJson({ entities });
+    return;
+  }
+
+  if (subcommand === "profile") {
+    const slug = positionals[0];
+    if (!slug) {
+      throw new Error("memory profile requires <entity-slug>");
+    }
+    const profile = useApi
+      ? await requestApi<unknown>(`/api/entities/${encodeURIComponent(slug)}`)
+      : await (await createMemoryStore()).getProfile(slug);
+    if (!profile) {
+      throw new Error(`Entity not found: ${slug}`);
+    }
+    printJson(profile);
     return;
   }
 

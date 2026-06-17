@@ -16,6 +16,7 @@
     "@company-brain/workspace": "workspace:*"
   },
   "devDependencies": {
+    "@company-brain/pages": "workspace:*",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }

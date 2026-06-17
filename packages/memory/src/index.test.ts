@@ -346,3 +346,49 @@ test("U6: listEntities and getProfile expose the derived entities", async () => 
     assert.equal(await store.getProfile("does-not-exist"), null);
   });
 });
+
+// --- U7: a memory's page citation survives a page rename --------------------
+
+import { createPageStore } from "@company-brain/pages";
+
+test("U7: memory page citation survives a page rename (id stable)", async () => {
+  const wsDir = await mkdtemp(join(tmpdir(), "company-brain-cite-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "company-brain-cite-db-"));
+  const db = await createDb(dbDir);
+  const ws = createWorkspace({ workspaceDir: wsDir });
+  const gitWriter = createGitWriter({ workspaceDir: wsDir });
+  try {
+    const pages = await createPageStore(db, { gitWriter, workspace: ws });
+    const memory = await createMemoryStore(db, { gitWriter, workspace: ws });
+
+    const page = await pages.create({ title: "Spec", html: "<h1>Spec</h1><p>x</p>", actor: "a" });
+    assert.equal(page.slug, "spec");
+
+    const saved = await memory.saveMemory({
+      kind: "decision",
+      subject: "Storage",
+      content: "Decided per the spec.",
+      sources: [{ sourceType: "page", pageId: page.id, pageChunkId: null, artifactId: null, sourceChunkId: null, quote: null }],
+    });
+    const before = await db.query<{ page_id: string | null }>("select page_id from memory_sources where memory_id = $1", [saved.id]);
+    assert.equal(before.rows[0]?.page_id, page.id); // citation resolved to the page id
+
+    // Rename the page (title -> slug change); the page id is invariant.
+    const renamed = await pages.update(page.id, { title: "Specification", html: "<h1>Specification</h1><p>x</p>", actor: "a" });
+    assert.equal(renamed?.id, page.id);
+    assert.notEqual(renamed?.slug, "spec");
+
+    // The citation still points at the same (now-renamed) page.
+    const after = await db.query<{ page_id: string | null }>("select page_id from memory_sources where memory_id = $1", [saved.id]);
+    assert.equal(after.rows[0]?.page_id, page.id);
+    const stillResolves = await db.query<{ slug: string }>("select slug from pages where id = $1 and deleted_at is null", [page.id]);
+    assert.equal(stillResolves.rows[0]?.slug, renamed?.slug); // same id, new slug
+
+    const recall = await memory.recall("decided per the spec");
+    assert.equal(recall.results.some((r) => r.sourceId === saved.id), true);
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+});

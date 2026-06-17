@@ -457,6 +457,11 @@ export async function reindexEntities(
         [fact.id, fact.kind, fact.content, doc.title, fact.status, fact.confidence, doc.id]
       );
       for (const citeSlug of fact.citations) {
+        // Citations resolve [[slug]] -> page id. The stored memory_sources.page_id
+        // is then rename-stable (page id is invariant). Caveat: if the cited page
+        // is renamed AND this entity file is later re-committed, the stale [[slug]]
+        // won't re-resolve — rename-reference rewriting across files is a follow-up
+        // (same deferral as the pages layer).
         const page = await db.query<{ id: string }>(
           "select id from pages where slug = $1 and deleted_at is null",
           [citeSlug]

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { MemoryKind, MemoryStatus } from "./index.ts";
 import type { PageFrontmatter, StoredPage } from "@company-brain/workspace";
 
@@ -63,10 +63,20 @@ export function newFact(input: {
 function extractCitations(content: string): string[] {
   const slugs: string[] = [];
   for (const m of content.matchAll(CITATION)) {
-    const slug = m[1]?.trim();
+    // Support [[slug]] and [[slug|label]] — the slug is before the pipe.
+    const slug = m[1]?.split("|")[0]?.trim();
     if (slug && !slugs.includes(slug)) slugs.push(slug);
   }
   return slugs;
+}
+
+/**
+ * Stable id for a fact that has no explicit marker (e.g. hand-authored). Derived
+ * from its content so repeated parses / full rebuilds produce the same memory id
+ * (the rebuild-from-files invariant); app-written facts always carry a marker.
+ */
+function deterministicFactId(date: string, kind: string, content: string): string {
+  return "h" + createHash("sha1").update(`${date}|${kind}|${content}`).digest("hex").slice(0, 12);
 }
 
 /** Split the body into named `## ` sections (heading text → content). */
@@ -87,14 +97,15 @@ function sectionMap(markdown: string): Map<string, string> {
 function parseFactLine(line: string): EntityFact | null {
   const item = line.replace(/^\s*[-*]\s+/, "");
   if (item === line) return null; // not a list item
-  let id: string = randomUUID();
+  let markerId: string | null = null;
   let confidence = 1;
   let status: MemoryStatus = "active";
   let visible = item;
   const meta = item.match(FACT_META);
   if (meta) {
-    id = meta[1];
-    confidence = Number(meta[2]) || 1;
+    markerId = meta[1];
+    const conf = Number(meta[2]);
+    confidence = Number.isFinite(conf) ? conf : 1; // allow 0 (don't coerce via ||)
     status = (meta[3] as MemoryStatus) || "active";
     visible = item.slice(0, meta.index).trim();
   }
@@ -103,11 +114,16 @@ function parseFactLine(line: string): EntityFact | null {
   const date = parts[0].trim();
   const kind = parts[1].replace(/\*\*/g, "").trim() as MemoryKind;
   const content = parts.slice(2).join(" · ").trim();
+  // Marker id wins; otherwise derive a stable id so rebuilds are deterministic.
+  const id = markerId ?? deterministicFactId(date, kind, content);
   return { id, date, kind, content, citations: extractCitations(content), confidence, status };
 }
 
 function serializeFact(fact: EntityFact): string {
-  return `- ${fact.date} · **${fact.kind}** · ${fact.content} <!--id:${fact.id} conf:${fact.confidence} status:${fact.status}-->`;
+  // A timeline fact is a single list item; collapse newlines so multi-line
+  // content can't split the item across lines (which the parser reads line-wise).
+  const content = fact.content.replace(/\s*\n\s*/g, " ").trim();
+  return `- ${fact.date} · **${fact.kind}** · ${content} <!--id:${fact.id} conf:${fact.confidence} status:${fact.status}-->`;
 }
 
 /** Parse an entity file (frontmatter + body) into a structured doc. */

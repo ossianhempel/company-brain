@@ -91,3 +91,33 @@ test("parses a hand-authored file (no machine comment) and tolerates a new entit
   const empty = parseEntity({ frontmatter: { id: "e3", title: "New", type: "topic", tags: [], created: NOW, updated: NOW } as any, markdown: "## Summary\n\n\n\n## Timeline\n\n" });
   assert.equal(empty.facts.length, 0);
 });
+
+// --- code-review fixes ------------------------------------------------------
+
+test("confidence 0 round-trips (not coerced to 1)", () => {
+  const d = doc({ facts: [newFact({ kind: "fact", content: "Low.", date: NOW, confidence: 0, id: "z1" })] });
+  const stored = { frontmatter: { id: "e1", title: "Ada", type: "person", tags: [], created: NOW, updated: NOW } as any, markdown: buildEntityFile(d).markdown };
+  assert.equal(parseEntity(stored).facts[0].confidence, 0);
+});
+
+test("a marker-less fact gets a deterministic id (stable across rebuilds)", () => {
+  const handAuthored = "## Summary\n\nx\n\n## Timeline\n\n- 2026-06-10 · **decision** · Adopted markdown-first.";
+  const fm = { id: "e9", title: "X", type: "project", tags: [], created: NOW, updated: NOW } as any;
+  const a = parseEntity({ frontmatter: fm, markdown: handAuthored }).facts[0].id;
+  const b = parseEntity({ frontmatter: fm, markdown: handAuthored }).facts[0].id;
+  assert.equal(a, b); // deterministic — full reindex won't churn the memory id
+  assert.match(a, /^h[0-9a-f]{12}$/);
+});
+
+test("multi-line content collapses to one line and survives round-trip", () => {
+  const d = doc({ facts: [newFact({ kind: "fact", content: "Line one.\nLine two.", date: NOW, id: "n1" })] });
+  const stored = { frontmatter: { id: "e1", title: "Ada", type: "person", tags: [], created: NOW, updated: NOW } as any, markdown: buildEntityFile(d).markdown };
+  const parsed = parseEntity(stored).facts[0];
+  assert.equal(parsed.content, "Line one. Line two.");
+  assert.equal(parsed.content.includes("\n"), false);
+});
+
+test("[[slug|label]] citation extracts the slug, not the label", () => {
+  const f = newFact({ kind: "decision", content: "Per [[the-spec|the spec doc]].", date: NOW, id: "c9" });
+  assert.deepEqual(f.citations, ["the-spec"]);
+});

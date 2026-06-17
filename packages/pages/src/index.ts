@@ -1,9 +1,17 @@
-import { randomBytes, randomUUID, scrypt as scryptCallback } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt as scryptCallback } from "node:crypto";
 import { promisify } from "node:util";
 import sanitizeHtml from "sanitize-html";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import type { GitWriter } from "@company-brain/git-writer";
+import { SANITIZE_OPTIONS, type Workspace } from "@company-brain/workspace";
 
 const scrypt = promisify(scryptCallback);
+
+/** Options enabling file-canonical mode: writes go to markdown files + git. */
+export interface PageStoreOptions {
+  gitWriter?: GitWriter;
+  workspace?: Workspace;
+}
 
 export type Page = {
   id: string;
@@ -742,19 +750,9 @@ function prepareHtml(html: string) {
     return `<a href="/pages/${slug}" data-page-slug="${slug}">${label}</a>`;
   });
 
-  const sanitizedHtml = sanitizeHtml(withInternalLinks, {
-    allowedTags: sanitizeHtml.defaults.allowedTags.concat(["h1", "h2", "img"]),
-    allowedAttributes: {
-      ...sanitizeHtml.defaults.allowedAttributes,
-      a: ["href", "name", "target", "rel", "data-page-slug"],
-      img: ["src", "alt", "title", "width", "height", "loading"]
-    },
-    allowedSchemes: ["http", "https", "mailto", "tel"],
-    transformTags: {
-      a: sanitizeHtml.simpleTransform("a", { rel: "noreferrer" }, true),
-      img: sanitizeHtml.simpleTransform("img", { loading: "lazy" }, true)
-    }
-  });
+  // Shared allowlist (single source of truth in @company-brain/workspace) so the
+  // editor write path and markdown reindex path sanitize identically.
+  const sanitizedHtml = sanitizeHtml(withInternalLinks, SANITIZE_OPTIONS);
 
   return {
     html: sanitizedHtml,
@@ -862,8 +860,230 @@ async function reindexPageChunks(db: CompanyBrainDb, pageId: string, title: stri
   }
 }
 
-export async function createPageStore(db?: CompanyBrainDb) {
+/**
+ * Rebuild the derived index row(s) for the given page slugs from their markdown
+ * files. A missing file becomes a soft-delete (tombstone), so history stays
+ * citable while the index reflects the working tree. Incremental: a file whose
+ * content_hash is unchanged is skipped.
+ */
+export async function reindexPages(
+  db: CompanyBrainDb,
+  workspace: Workspace,
+  slugs: string[]
+): Promise<void> {
+  // Parent assignments are applied in a second pass so a child reindexed before
+  // its parent doesn't violate the parent_page_id FK during a full rebuild.
+  const parentLinks: Array<{ id: string; parentPageId: string }> = [];
+  for (const slug of slugs) {
+    const stored = await workspace.readPage(slug);
+    if (!stored) {
+      await db.query(
+        "update pages set deleted_at = now() where slug = $1 and deleted_at is null",
+        [slug]
+      );
+      continue;
+    }
+
+    const fm = stored.frontmatter;
+    // Hash over frontmatter + body so metadata-only changes (e.g. a move that
+    // only updates parentPageId) aren't skipped by the incremental check.
+    const hash = createHash("sha256")
+      .update(JSON.stringify(fm))
+      .update("\n")
+      .update(stored.markdown)
+      .digest("hex");
+    const existing = await db.query<{ content_hash: string | null }>(
+      "select content_hash from pages where id = $1 and deleted_at is null",
+      [fm.id]
+    );
+    if (existing.rows[0]?.content_hash === hash) {
+      continue; // unchanged
+    }
+
+    const prepared = prepareHtml(workspace.markdownToHtml(stored.markdown));
+    // Attribution is carried in frontmatter so a rebuild preserves it. creator
+    // and created_at are immutable (set on insert, never on conflict-update).
+    const creator = fm.creator ?? fm.owner ?? "system";
+    const createdBy = fm.createdBy ?? creator;
+    const updatedBy = fm.updatedBy ?? createdBy;
+    const owner = fm.owner ?? creator;
+    await db.query(
+      `
+        insert into pages (
+          id, title, slug, html, plain_text, creator, created_by, updated_by,
+          created_at, updated_at, visibility, owner, permission_note,
+          parent_page_id, pinned_order, content_hash
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        on conflict (id) do update set
+          title = excluded.title,
+          slug = excluded.slug,
+          html = excluded.html,
+          plain_text = excluded.plain_text,
+          created_by = excluded.created_by,
+          updated_by = excluded.updated_by,
+          updated_at = excluded.updated_at,
+          visibility = excluded.visibility,
+          owner = excluded.owner,
+          permission_note = excluded.permission_note,
+          parent_page_id = excluded.parent_page_id,
+          pinned_order = excluded.pinned_order,
+          content_hash = excluded.content_hash,
+          deleted_at = null
+      `,
+      [
+        fm.id,
+        fm.title,
+        slug,
+        prepared.html,
+        prepared.plainText,
+        creator,
+        createdBy,
+        updatedBy,
+        fm.created ?? new Date().toISOString(),
+        fm.updated ?? new Date().toISOString(),
+        fm.visibility ?? "workspace",
+        owner,
+        fm.permissionNote ?? null,
+        null, // parent_page_id assigned in the second pass (FK ordering)
+        fm.pinnedOrder ?? null,
+        hash,
+      ]
+    );
+    await writeLinks(db, fm.id, prepared.links);
+    await reindexPageChunks(db, fm.id, fm.title, prepared.html);
+    if (fm.parentPageId) {
+      parentLinks.push({ id: fm.id, parentPageId: fm.parentPageId });
+    }
+  }
+
+  // Second pass: now that all rows exist, set parent_page_id where the parent is
+  // present (a dangling parent reference is left null rather than failing).
+  for (const { id, parentPageId } of parentLinks) {
+    await db.query(
+      "update pages set parent_page_id = $2 where id = $1 and exists (select 1 from pages where id = $2)",
+      [id, parentPageId]
+    );
+  }
+}
+
+/** Rebuild the entire derived index from every page file on disk. */
+export async function reindexAllPages(db: CompanyBrainDb, workspace: Workspace): Promise<void> {
+  const slugs = await workspace.listPageSlugs();
+  await reindexPages(db, workspace, slugs);
+
+  // Tombstone any live index row whose file no longer exists on disk.
+  const onDisk = new Set(slugs);
+  const live = await db.query<{ slug: string }>(
+    "select slug from pages where deleted_at is null"
+  );
+  for (const { slug } of live.rows) {
+    if (!onDisk.has(slug)) {
+      await db.query("update pages set deleted_at = now() where slug = $1 and deleted_at is null", [
+        slug,
+      ]);
+    }
+  }
+}
+
+export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptions) {
   const pageDb = db ?? (await createDb());
+  const gitWriter = opts?.gitWriter;
+  const workspace = opts?.workspace;
+  const fileMode = Boolean(gitWriter && workspace);
+
+  // Derive the DB index inside the git writer's serialized commit hook, so the
+  // index update is atomic with the commit (never races a concurrent mutation).
+  if (fileMode) {
+    gitWriter!.setOnCommit(async ({ paths }) => {
+      const slugs = [...new Set(paths.map((p) => workspace!.slugFromPath(p)))];
+      await reindexPages(pageDb, workspace!, slugs);
+    });
+  }
+
+  /**
+   * In file mode, write+commit the page's markdown file (the canonical record).
+   * Frontmatter carries every persisted field so the DB index is fully
+   * rebuildable from the file alone. On a rename, the old file is removed in the
+   * same commit.
+   */
+  async function writePageFile(
+    page: Page,
+    actor: string,
+    oldSlug?: string,
+    exclusive = false
+  ): Promise<void> {
+    if (!fileMode) return;
+    const ws = workspace!;
+    const markdown = ws.htmlToMarkdown(page.html);
+    const renamed = oldSlug && oldSlug !== page.slug ? oldSlug : undefined;
+
+    // Preserve (and on rename, extend) the page's slug history so version
+    // history can follow renames. Read it from the source file being superseded.
+    const sourceStored = await ws.readPage(renamed ?? page.slug);
+    const priorSlugs = (sourceStored?.frontmatter.previousSlugs as string[] | undefined) ?? [];
+    const previousSlugs = renamed ? [...priorSlugs, renamed] : priorSlugs;
+
+    const frontmatter = {
+      id: page.id,
+      title: page.title,
+      created: page.createdAt,
+      updated: page.updatedAt,
+      tags: [] as string[],
+      visibility: page.visibility,
+      owner: page.owner,
+      creator: page.creator,
+      createdBy: page.createdBy,
+      updatedBy: page.updatedBy,
+      parentPageId: page.parentPageId,
+      pinnedOrder: page.pinnedOrder,
+      permissionNote: page.permissionNote,
+      ...(previousSlugs.length ? { previousSlugs } : {}),
+    };
+    const paths = [ws.pageFilePath(page.slug)];
+    // Stage both old-path variants so a rename removes a directory-index page too.
+    if (renamed) paths.push(ws.pageFilePath(renamed), ws.dirIndexPath(renamed));
+    await gitWriter!.enqueue({
+      paths,
+      message: `save ${page.slug}`,
+      actor: { name: actor },
+      write: async () => {
+        await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt, { exclusive });
+        if (renamed) await ws.deletePage(renamed);
+      },
+    });
+  }
+
+  /**
+   * File-first persist: commit the markdown file, then derive the DB index from
+   * it via reindex (the single index writer). Returns the reindexed page so the
+   * DB never leads the canonical files.
+   */
+  async function persistPageFileMode(
+    page: Page,
+    actor: string,
+    oldSlug?: string,
+    exclusive = false
+  ): Promise<Page> {
+    // writePageFile commits, and the git writer's commit hook reindexes inside
+    // the same serialized mutation, so the DB is current once this resolves.
+    await writePageFile(page, actor, oldSlug, exclusive);
+    return (await getBySlug(page.slug)) ?? page;
+  }
+
+  /** In file mode, remove the page's markdown file and commit the deletion. */
+  async function deletePageFile(slug: string, actor: string): Promise<void> {
+    if (!fileMode) return;
+    const ws = workspace!;
+    await gitWriter!.enqueue({
+      paths: [ws.pageFilePath(slug), ws.dirIndexPath(slug)], // both variants
+      message: `delete ${slug}`,
+      actor: { name: actor },
+      write: async () => {
+        await ws.deletePage(slug);
+      },
+    });
+  }
 
   async function getBySlug(slug: string) {
     const result = await pageDb.query<PageRow>("select * from pages where slug = $1 and deleted_at is null", [slug]);
@@ -890,19 +1110,51 @@ export async function createPageStore(db?: CompanyBrainDb) {
     return toPage(result.rows[0]);
   }
 
-  const homePage = await ensureHomePage();
-  const existingHomeChunks = await pageDb.query<{ id: string }>("select id from page_chunks where page_id = $1 limit 1", [
-    homePage.id
-  ]);
-  if (existingHomeChunks.rows.length === 0) {
-    await reindexPageChunks(pageDb, homePage.id, homePage.title, homePage.html);
-  }
-  const existingHomeVersions = await pageDb.query<{ id: string }>(
-    "select id from page_versions where page_id = $1 limit 1",
-    [homePage.id]
-  );
-  if (existingHomeVersions.rows.length === 0) {
-    await snapshotPage(pageDb, homePage, homePage.updatedBy);
+  if (fileMode) {
+    // Files are canonical: never write the DB's home page over an existing
+    // home.md. If the file exists, index it; otherwise seed a default home file.
+    const existingHome = await workspace!.readPage(homePageSlug);
+    if (existingHome) {
+      await reindexPages(pageDb, workspace!, [homePageSlug]);
+    } else {
+      const now = new Date().toISOString();
+      const prepared = prepareHtml(homePageHtml);
+      const home: Page = {
+        id: randomUUID(),
+        title: homePageTitle,
+        slug: homePageSlug,
+        html: prepared.html,
+        plainText: prepared.plainText,
+        creator: "system",
+        createdBy: "system",
+        updatedBy: "system",
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+        pinnedOrder: 0,
+        parentPageId: null,
+        visibility: "workspace",
+        owner: "system",
+        permissionNote: null,
+      };
+      await writePageFile(home, "system"); // commit hook indexes it
+    }
+  } else {
+    const homePage = await ensureHomePage();
+    const existingHomeChunks = await pageDb.query<{ id: string }>(
+      "select id from page_chunks where page_id = $1 limit 1",
+      [homePage.id]
+    );
+    if (existingHomeChunks.rows.length === 0) {
+      await reindexPageChunks(pageDb, homePage.id, homePage.title, homePage.html);
+    }
+    const existingHomeVersions = await pageDb.query<{ id: string }>(
+      "select id from page_versions where page_id = $1 limit 1",
+      [homePage.id]
+    );
+    if (existingHomeVersions.rows.length === 0) {
+      await snapshotPage(pageDb, homePage, homePage.updatedBy);
+    }
   }
 
   return {
@@ -1345,6 +1597,35 @@ export async function createPageStore(db?: CompanyBrainDb) {
         return null;
       }
 
+      // File mode: history is git. Version id = commit hash. Follow renames by
+      // unioning history across the current path and every prior slug.
+      if (fileMode) {
+        const stored = await workspace!.readPage(page.slug);
+        const previousSlugs = (stored?.frontmatter.previousSlugs as string[] | undefined) ?? [];
+        const paths = [page.slug, ...previousSlugs].map((s) => workspace!.pageFilePath(s));
+        const seen = new Set<string>();
+        const commits: { hash: string; author: { name: string }; timestamp: number }[] = [];
+        for (const p of paths) {
+          for (const c of await gitWriter!.history(p)) {
+            if (!seen.has(c.hash)) {
+              seen.add(c.hash);
+              commits.push(c);
+            }
+          }
+        }
+        commits.sort((a, b) => b.timestamp - a.timestamp);
+        return commits.map<PageVersion>((c) => ({
+          id: c.hash,
+          pageId: id,
+          title: page.title,
+          slug: page.slug,
+          html: "",
+          plainText: "",
+          createdBy: c.author.name,
+          createdAt: new Date(c.timestamp * 1000).toISOString(),
+        }));
+      }
+
       const result = await pageDb.query<PageVersionRow>(
         `
           select *
@@ -1358,6 +1639,42 @@ export async function createPageStore(db?: CompanyBrainDb) {
     },
 
     async getVersion(id: string, versionId: string) {
+      // File mode: read the page file as of the commit and re-derive HTML.
+      if (fileMode) {
+        const page = await this.get(id);
+        if (!page) return null;
+        // The commit may have touched a prior path (pre-rename), so try the
+        // current slug first, then any previous slugs.
+        const current = await workspace!.readPage(page.slug);
+        const previousSlugs = (current?.frontmatter.previousSlugs as string[] | undefined) ?? [];
+        let raw: string | null = null;
+        for (const s of [page.slug, ...previousSlugs]) {
+          try {
+            raw = await gitWriter!.restore(versionId, workspace!.pageFilePath(s));
+            break;
+          } catch {
+            // try the next path
+          }
+        }
+        if (raw === null) return null;
+        const stored = workspace!.parsePage(raw);
+        const html = workspace!.sanitizePageHtml(workspace!.markdownToHtml(stored.markdown));
+        const meta = await gitWriter!.commitMeta(versionId);
+        return {
+          id: versionId,
+          pageId: id,
+          title: stored.frontmatter.title,
+          slug: page.slug,
+          html,
+          plainText: stripHtml(html),
+          // Attribution comes from the commit, matching listVersions.
+          createdBy: meta?.author.name ?? "unknown",
+          createdAt: meta
+            ? new Date(meta.timestamp * 1000).toISOString()
+            : (stored.frontmatter.updated ?? new Date().toISOString()),
+        } satisfies PageVersion;
+      }
+
       const result = await pageDb.query<PageVersionRow>(
         `
           select *
@@ -1389,6 +1706,32 @@ export async function createPageStore(db?: CompanyBrainDb) {
       const pageInput = preparePageInput(input);
       const slug = await ensureUniqueSlug(pageDb, pageInput.title);
       const prepared = prepareHtml(pageInput.html);
+
+      if (fileMode) {
+        const now = new Date().toISOString();
+        const page: Page = {
+          id,
+          title: pageInput.title,
+          slug,
+          html: prepared.html,
+          plainText: prepared.plainText,
+          creator: actor,
+          createdBy: actor,
+          updatedBy: actor,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          pinnedOrder: input.pinnedOrder ?? null,
+          parentPageId: input.parentPageId ?? null,
+          visibility: input.visibility ?? "workspace",
+          owner: input.owner?.trim() || actor,
+          permissionNote: input.permissionNote?.trim() || null,
+        };
+        const saved = await persistPageFileMode(page, actor, undefined, true); // exclusive create
+        await recordPageActivity(pageDb, id, "page.created", `Created ${saved.title}`, actor);
+        return saved;
+      }
+
       const result = await pageDb.query<PageRow>(
         `
           insert into pages (
@@ -1427,6 +1770,32 @@ export async function createPageStore(db?: CompanyBrainDb) {
       const pageInput = preparePageInput(input);
       const slug = await ensureUniqueSlugFromBase(pageDb, input.slug);
       const prepared = prepareHtml(pageInput.html);
+
+      if (fileMode) {
+        const now = new Date().toISOString();
+        const page: Page = {
+          id,
+          title: pageInput.title,
+          slug,
+          html: prepared.html,
+          plainText: prepared.plainText,
+          creator: actor,
+          createdBy: actor,
+          updatedBy: actor,
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          pinnedOrder: input.pinnedOrder ?? null,
+          parentPageId: input.parentPageId ?? null,
+          visibility: input.visibility ?? "workspace",
+          owner: input.owner?.trim() || actor,
+          permissionNote: input.permissionNote?.trim() || null,
+        };
+        const saved = await persistPageFileMode(page, actor, undefined, true); // exclusive create
+        await recordPageActivity(pageDb, id, "page.created", `Created ${saved.title}`, actor);
+        return saved;
+      }
+
       const result = await pageDb.query<PageRow>(
         `
           insert into pages (
@@ -1538,6 +1907,25 @@ export async function createPageStore(db?: CompanyBrainDb) {
       const slug = title !== current.title ? await ensureUniqueSlug(pageDb, title, id) : current.slug;
       const prepared = prepareHtml(pageInput.html);
 
+      if (fileMode) {
+        const now = new Date().toISOString();
+        const page: Page = {
+          ...current,
+          title,
+          slug,
+          html: prepared.html,
+          plainText: prepared.plainText,
+          updatedBy: actor,
+          updatedAt: now,
+        };
+        const saved = await persistPageFileMode(page, actor, current.slug);
+        await recordPageActivity(pageDb, id, "page.updated", `Updated ${saved.title}`, actor, {
+          previousTitle: current.title,
+          title: saved.title,
+        });
+        return saved;
+      }
+
       const result = await pageDb.query<PageRow>(
         `
           update pages
@@ -1591,6 +1979,21 @@ export async function createPageStore(db?: CompanyBrainDb) {
         }
       }
 
+      if (fileMode) {
+        const actor = input.actor ?? "local-user";
+        const page: Page = {
+          ...current,
+          parentPageId: parentId,
+          updatedBy: actor,
+          updatedAt: new Date().toISOString(),
+        };
+        const saved = await persistPageFileMode(page, actor);
+        await recordPageActivity(pageDb, id, "page.moved", `Moved ${saved.title}`, actor, {
+          parentPageId: parentId,
+        });
+        return saved;
+      }
+
       const result = await pageDb.query<PageRow>(
         `
           update pages
@@ -1628,6 +2031,16 @@ export async function createPageStore(db?: CompanyBrainDb) {
     },
 
     async softDelete(id: string, actor = "local-user") {
+      if (fileMode) {
+        const current = await this.get(id);
+        if (!current || current.slug === homePageSlug) {
+          return null;
+        }
+        await deletePageFile(current.slug, actor); // commit hook reindexes -> tombstone
+        await recordPageActivity(pageDb, id, "page.deleted", `Deleted ${current.title}`, actor);
+        return { ...current, deletedAt: new Date().toISOString() };
+      }
+
       const result = await pageDb.query<PageRow>(
         `
           update pages

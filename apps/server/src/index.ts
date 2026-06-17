@@ -3,8 +3,10 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { createDb } from "@company-brain/db";
+import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writer";
+import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 import { createMemoryStore } from "@company-brain/memory";
-import { createPageStore } from "@company-brain/pages";
+import { createPageStore, reindexAllPages } from "@company-brain/pages";
 
 const pageInput = z.object({
   title: z.string().min(1),
@@ -88,12 +90,33 @@ const memoryListInput = z.object({
 
 const app = new Hono();
 const db = await createDb();
-const pages = await createPageStore(db);
+
+// Files+git are canonical; the DB is the derived index. The server is the
+// single writer to the workspace git repo.
+const workspaceDir = resolveWorkspaceDir();
+const workspace = createWorkspace({ workspaceDir });
+const gitWriter = createGitWriter({ workspaceDir });
+const pages = await createPageStore(db, { gitWriter, workspace });
 const memory = await createMemoryStore(db);
 
 app.use("*", cors());
 
+// Optimistic-concurrency conflicts from the git writer map to HTTP 409.
+app.onError((err, c) => {
+  if (err instanceof WorkspaceConflictError) {
+    return c.json({ error: "conflict", message: err.message }, 409);
+  }
+  console.error(err);
+  return c.json({ error: "internal", message: err instanceof Error ? err.message : "error" }, 500);
+});
+
 app.get("/health", (c) => {
+  return c.json({ ok: true });
+});
+
+// Rebuild the derived index from the workspace files (admin/recovery).
+app.post("/api/admin/reindex", async (c) => {
+  await reindexAllPages(db, workspace);
   return c.json({ ok: true });
 });
 

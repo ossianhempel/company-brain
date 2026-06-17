@@ -1,10 +1,35 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
-import { createPageStore } from "./index.ts";
+import { createGitWriter } from "@company-brain/git-writer";
+import { createWorkspace } from "@company-brain/workspace";
+import { createPageStore, reindexAllPages } from "./index.ts";
+
+/** Harness for file-canonical mode: separate temp dirs for git workspace + db. */
+async function withFilePageStore<T>(
+  run: (
+    pages: Awaited<ReturnType<typeof createPageStore>>,
+    ctx: { db: CompanyBrainDb; workspace: ReturnType<typeof createWorkspace>; gitWriter: ReturnType<typeof createGitWriter>; wsDir: string }
+  ) => Promise<T>
+) {
+  const wsDir = await mkdtemp(join(tmpdir(), "company-brain-pages-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "company-brain-pages-db-"));
+  const db = await createDb(dbDir);
+  const workspace = createWorkspace({ workspaceDir: wsDir });
+  const gitWriter = createGitWriter({ workspaceDir: wsDir });
+  try {
+    const pages = await createPageStore(db, { gitWriter, workspace });
+    return await run(pages, { db, workspace, gitWriter, wsDir });
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+}
 
 async function withPageStore<T>(
   run: (pages: Awaited<ReturnType<typeof createPageStore>>, db: CompanyBrainDb) => Promise<T>
@@ -363,5 +388,181 @@ test("creates PARA workspace and project template pages", async () => {
       actor: "test-agent"
     });
     assert.equal(topLevel?.parentPageId, null);
+  });
+});
+
+// --- Phase 1: file-canonical mode (U5/U6/U7) -------------------------------
+
+test("file mode: create writes a markdown file and one attributed commit", async () => {
+  await withFilePageStore(async (pages, { gitWriter, wsDir }) => {
+    const page = await pages.create({
+      title: "Launch Plan",
+      html: "<h1>Launch Plan</h1><p>Body.</p>",
+      actor: "alice"
+    });
+    assert.equal(existsSync(join(wsDir, "pages", "launch-plan.md")), true);
+    const hist = await gitWriter.history("pages/launch-plan.md");
+    assert.equal(hist.length, 1);
+    assert.equal(hist[0].author.name, "alice");
+
+    await pages.update(page.id, { html: "<h1>Launch Plan</h1><p>Updated.</p>", actor: "bob" });
+    const hist2 = await gitWriter.history("pages/launch-plan.md");
+    assert.equal(hist2.length, 2);
+    assert.equal(hist2[0].author.name, "bob");
+  });
+});
+
+test("file mode (U5): page id is stable across a rename and the file moves", async () => {
+  await withFilePageStore(async (pages, { workspace, wsDir }) => {
+    const page = await pages.create({ title: "Original", html: "<h1>Original</h1>", actor: "a" });
+    const updated = await pages.update(page.id, { title: "Renamed", html: "<h1>Renamed</h1>", actor: "a" });
+
+    assert.equal(updated?.id, page.id); // id stable
+    assert.notEqual(updated?.slug, page.slug); // slug changed
+    assert.equal(existsSync(join(wsDir, "pages", "original.md")), false); // old file gone
+    assert.equal(existsSync(join(wsDir, "pages", "renamed.md")), true);
+
+    const stored = await workspace.readPage("renamed");
+    assert.equal(stored?.frontmatter.id, page.id); // citation key preserved
+  });
+});
+
+test("file mode (U7): reindexAllPages rebuilds the index from files alone", async () => {
+  await withFilePageStore(async (pages, { db, workspace }) => {
+    await pages.create({ title: "Alpha", html: "<h1>Alpha</h1><p>alpha body</p>", actor: "a" });
+    await pages.create({ title: "Beta", html: "<h1>Beta</h1><p>beta body</p>", actor: "a" });
+
+    // Nuke the derived index entirely.
+    await db.query("delete from page_links");
+    await db.query("delete from page_chunks");
+    await db.query("delete from pages");
+    assert.equal((await pages.list()).length, 0);
+
+    await reindexAllPages(db, workspace);
+
+    const list = await pages.list();
+    assert.ok(list.find((p) => p.slug === "alpha"));
+    assert.ok(list.find((p) => p.slug === "beta"));
+    const results = await pages.search("alpha body");
+    assert.ok(results.length >= 1);
+  });
+});
+
+test("file mode (U7): reindex is incremental and tombstones deleted files", async () => {
+  await withFilePageStore(async (pages, { db, workspace, wsDir }) => {
+    const page = await pages.create({ title: "Doomed", html: "<h1>Doomed</h1><p>x</p>", actor: "a" });
+    // Remove the file directly, then reindex its slug -> tombstone.
+    await rm(join(wsDir, "pages", "doomed.md"), { force: true });
+    await reindexAllPages(db, workspace);
+    const row = await db.query<{ deleted_at: string | null }>(
+      "select deleted_at from pages where id = $1",
+      [page.id]
+    );
+    assert.notEqual(row.rows[0]?.deleted_at, null);
+  });
+});
+
+test("file mode (U8): version history is backed by git", async () => {
+  await withFilePageStore(async (pages) => {
+    const page = await pages.create({ title: "Versioned", html: "<h1>Versioned</h1><p>v1</p>", actor: "a" });
+    await pages.update(page.id, { html: "<h1>Versioned</h1><p>v2</p>", actor: "b" });
+
+    const versions = await pages.listVersions(page.id);
+    assert.equal(versions?.length, 2); // create + update commits
+    assert.equal(versions?.[0].createdBy, "b"); // newest first
+
+    const oldest = versions![versions!.length - 1];
+    const got = await pages.getVersion(page.id, oldest.id);
+    assert.match(got!.html, /v1/);
+
+    const restored = await pages.restoreVersion(page.id, oldest.id, "a");
+    assert.match(restored!.html, /v1/);
+    assert.equal((await pages.listVersions(page.id))?.length, 3); // restore adds a commit
+  });
+});
+
+test("file mode (U8): parentPageId and attribution survive a full reindex", async () => {
+  await withFilePageStore(async (pages, { db, workspace }) => {
+    const parent = await pages.create({ title: "Parent", html: "<h1>Parent</h1>", actor: "alice" });
+    const child = await pages.create({ title: "Child", html: "<h1>Child</h1>", actor: "alice" });
+    const moved = await pages.move(child.id, { parentPageId: parent.id, actor: "bob" });
+    assert.equal(moved?.parentPageId, parent.id); // move reaches the DB
+
+    // Rebuild the index from files alone.
+    await db.query("delete from page_links");
+    await db.query("delete from page_chunks");
+    await db.query("delete from pages");
+    await reindexAllPages(db, workspace);
+
+    const rebuilt = await pages.get(child.id);
+    assert.equal(rebuilt?.parentPageId, parent.id); // parent survived the rebuild
+    assert.equal(rebuilt?.creator, "alice"); // original creator preserved, not overwritten
+  });
+});
+
+test("file mode: create refuses to overwrite an existing file at the slug path", async () => {
+  await withFilePageStore(async (pages, { wsDir }) => {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    // Simulate a file already committed at the slug a concurrent create would pick.
+    await mkdir(join(wsDir, "pages"), { recursive: true });
+    await writeFile(
+      join(wsDir, "pages", "dup.md"),
+      "---\nid: 22222222-2222-2222-2222-222222222222\ntitle: Dup\ncreated: x\nupdated: x\n---\n# Dup\n",
+      "utf8"
+    );
+    await assert.rejects(() => pages.create({ title: "Dup", html: "<h1>Dup</h1>", actor: "a" }));
+  });
+});
+
+test("file mode: startup does not overwrite an edited home.md", async () => {
+  const wsDir = await mkdtemp(join(tmpdir(), "company-brain-home-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "company-brain-home-db-"));
+  const db = await createDb(dbDir);
+  try {
+    const ws = createWorkspace({ workspaceDir: wsDir });
+    const gw = createGitWriter({ workspaceDir: wsDir });
+    const store1 = await createPageStore(db, { gitWriter: gw, workspace: ws });
+    const home = await store1.getBySlug("home");
+    assert.ok(home);
+    await store1.update(home.id, { html: "<h1>Home</h1><p>CUSTOM HOME CONTENT</p>", actor: "alice" });
+
+    // A second store construction (simulating a restart) must not clobber it.
+    const store2 = await createPageStore(db, {
+      gitWriter: createGitWriter({ workspaceDir: wsDir }),
+      workspace: createWorkspace({ workspaceDir: wsDir }),
+    });
+    const reread = await store2.getBySlug("home");
+    assert.match(reread!.html, /CUSTOM HOME CONTENT/);
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+});
+
+test("file mode: version history follows a title rename", async () => {
+  await withFilePageStore(async (pages) => {
+    const page = await pages.create({ title: "Original Title", html: "<h1>Original Title</h1><p>v1</p>", actor: "a" });
+    const renamed = await pages.update(page.id, { title: "New Title", html: "<h1>New Title</h1><p>v2</p>", actor: "b" });
+    assert.notEqual(renamed?.slug, page.slug); // slug changed
+
+    const versions = await pages.listVersions(page.id);
+    assert.equal(versions?.length, 2); // both the create (old path) and rename commits
+
+    // The pre-rename version is still restorable.
+    const oldest = versions![versions!.length - 1];
+    const got = await pages.getVersion(page.id, oldest.id);
+    assert.match(got!.html, /v1/);
+  });
+});
+
+test("file mode: getVersion attributes to the commit author, not the page owner", async () => {
+  await withFilePageStore(async (pages) => {
+    // owner differs from the actor so the assertion distinguishes the two.
+    const page = await pages.create({ title: "Owned", html: "<h1>Owned</h1><p>v1</p>", actor: "alice", owner: "carol" });
+    assert.equal(page.owner, "carol");
+    const versions = await pages.listVersions(page.id);
+    const got = await pages.getVersion(page.id, versions![0].id);
+    assert.equal(got?.createdBy, "alice"); // commit author, not the "carol" owner
   });
 });

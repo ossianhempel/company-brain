@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { readdir, readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { createDb, type CompanyBrainDb } from "@company-brain/db";
+import { createGitWriter } from "@company-brain/git-writer";
 import {
   createMemoryStore,
   type MemoryKind,
@@ -11,11 +13,13 @@ import {
 } from "@company-brain/memory";
 import {
   createPageStore,
+  reindexAllPages,
   type Page,
   type PageSearchResult,
   type PageVersion,
   type PageWithRelations
 } from "@company-brain/pages";
+import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 
 type Flags = Record<string, string | boolean>;
 
@@ -226,6 +230,19 @@ async function ingestArtifact(input: {
   });
 }
 
+/**
+ * Direct-mode page store with the file-backed writer wired in, so offline
+ * `--direct` writes commit markdown to data/workspace (not DB-only, which the
+ * next reindex would tombstone).
+ */
+async function directPageStore() {
+  const workspaceDir = resolveWorkspaceDir();
+  return createPageStore(await createDb(), {
+    gitWriter: createGitWriter({ workspaceDir }),
+    workspace: createWorkspace({ workspaceDir }),
+  });
+}
+
 async function resolvePage(ref: string) {
   const pages = await createPageStore();
   const byId = await pages.get(ref);
@@ -371,6 +388,23 @@ async function main() {
   if (command === "doctor") {
     const { flags } = parseFlags([subcommand, ...rest].filter(Boolean));
     const useApi = !flags.direct && (await canUseApi());
+
+    // Inspect the local workspace git repo + file count (files are canonical).
+    const workspaceDir = resolveWorkspaceDir();
+    let workspaceCheck = "missing";
+    let uncommitted = 0;
+    let fileCount = 0;
+    if (existsSync(path.join(workspaceDir, ".git"))) {
+      try {
+        const status = await createGitWriter({ workspaceDir }).status();
+        workspaceCheck = status.clean ? "clean" : "dirty";
+        uncommitted = status.changed.length;
+        fileCount = (await createWorkspace({ workspaceDir }).listPageSlugs()).length;
+      } catch {
+        workspaceCheck = "error";
+      }
+    }
+
     if (!useApi && !flags.direct) {
       printJson({
         ok: false,
@@ -378,7 +412,9 @@ async function main() {
           api: "not-running",
           database: "not-checked",
           homePage: "not-checked",
-          pageCount: 0
+          pageCount: 0,
+          workspace: workspaceCheck,
+          uncommitted
         }
       });
       return;
@@ -392,7 +428,11 @@ async function main() {
         api: useApi ? "ok" : "not-running",
         database: useApi ? "via-api" : "ok",
         homePage: home ? "ok" : "missing",
-        pageCount: allPages.length
+        pageCount: allPages.length,
+        workspace: workspaceCheck,
+        uncommitted,
+        // index is fresh when the live page count matches the file count
+        indexFresh: workspaceCheck === "missing" ? "n/a" : allPages.length === fileCount
       }
     });
     return;
@@ -410,6 +450,27 @@ async function main() {
 
   if (command === "migrate") {
     await handleMigrateCommand(subcommand, rest);
+    return;
+  }
+
+  if (command === "reindex") {
+    const { flags } = parseFlags([subcommand, ...rest].filter(Boolean));
+    const useApi = !flags.direct && (await canUseApi());
+    if (useApi) {
+      await requestApi("/api/admin/reindex", { method: "POST" });
+      printJson({ ok: true, mode: "api" });
+      return;
+    }
+    if (flags.direct && (await canUseApi())) {
+      throw new Error(
+        "Refusing --direct reindex: the server is running and owns the workspace. Omit --direct to use the API, or stop the server first."
+      );
+    }
+    const db = await createDb();
+    const workspace = createWorkspace({ workspaceDir: resolveWorkspaceDir() });
+    await reindexAllPages(db, workspace);
+    await db.close();
+    printJson({ ok: true, mode: "direct" });
     return;
   }
 
@@ -432,6 +493,15 @@ async function main() {
   const useApi = !flags.direct && (await canUseApi());
   if (!useApi && !flags.direct) {
     throw new Error("Company Brain API is not reachable. Start `pnpm dev` or pass --direct for local PGlite access.");
+  }
+
+  // Files+git are canonical and the server is the single writer. A --direct
+  // write while the server is up would race the workspace git lock, so demote.
+  const writeSubcommands = new Set(["create", "update", "duplicate", "move", "delete", "restore"]);
+  if (flags.direct && writeSubcommands.has(subcommand ?? "") && (await canUseApi())) {
+    throw new Error(
+      "Refusing --direct write: the server is running and owns the workspace. Omit --direct to use the API, or stop the server first."
+    );
   }
 
   if (subcommand === "list") {
@@ -522,7 +592,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ title, html, actor })
         })).page
-      : await (await createPageStore()).create({ title, html, actor });
+      : await (await directPageStore()).create({ title, html, actor });
     printJson({ page });
     return;
   }
@@ -548,7 +618,7 @@ async function main() {
           method: "PUT",
           body: JSON.stringify(body)
         })).page
-      : await (await createPageStore()).update(current.id, body);
+      : await (await directPageStore()).update(current.id, body);
     printJson({ page });
     return;
   }
@@ -570,7 +640,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ actor })
         })).page
-      : await (await createPageStore()).duplicate(current.id, actor);
+      : await (await directPageStore()).duplicate(current.id, actor);
     printJson({ page });
     return;
   }
@@ -601,7 +671,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ parentPageId, actor })
         })).page
-      : await (await createPageStore()).move(current.id, { parentPageId, actor });
+      : await (await directPageStore()).move(current.id, { parentPageId, actor });
     printJson({ page });
     return;
   }
@@ -622,7 +692,7 @@ async function main() {
           method: "DELETE",
           body: JSON.stringify({ actor: flagString(flags, "actor") ?? "cli" })
         })).page
-      : await (await createPageStore()).softDelete(current.id, flagString(flags, "actor") ?? "cli");
+      : await (await directPageStore()).softDelete(current.id, flagString(flags, "actor") ?? "cli");
     printJson({ page });
     return;
   }
@@ -644,7 +714,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ actor })
         })).page
-      : await (await createPageStore()).restoreVersion(current.id, versionId, actor);
+      : await (await directPageStore()).restoreVersion(current.id, versionId, actor);
     if (!page) {
       throw new Error(`Page version not found: ${ref} ${versionId}`);
     }

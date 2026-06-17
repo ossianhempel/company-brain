@@ -1000,10 +1000,12 @@ async function handleAgentsCommand(subcommand: string | undefined, rest: string[
     if (flags.direct && (await canUseApi())) {
       throw new Error("Refusing --direct run: the server is running and owns the workspace. Omit --direct, or stop the server first.");
     }
+    const runToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
     const conversation = useApi
       ? (
           await requestApi<{ conversation: unknown }>(`/api/agents/${encodeURIComponent(slug)}/run`, {
             method: "POST",
+            headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
             body: JSON.stringify({ prompt, provider, actor })
           })
         ).conversation

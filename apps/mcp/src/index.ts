@@ -733,9 +733,11 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   },
   async ({ slug, prompt, provider }) => {
+    const runToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
     return toolResult(
       await requestApi<{ conversation: unknown }>(`/api/agents/${encodeURIComponent(slug)}/run`, {
         method: "POST",
+        headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
         body: JSON.stringify({ prompt, provider, actor: "mcp" })
       })
     );

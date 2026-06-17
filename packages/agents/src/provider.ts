@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -62,8 +62,15 @@ function searchDirs(): string[] {
   const dirs = (process.env.PATH ?? "").split(":").filter(Boolean);
   dirs.push("/opt/homebrew/bin", "/usr/local/bin", dirname(process.execPath));
   if (process.env.NVM_BIN) dirs.push(process.env.NVM_BIN);
+  // nvm installs CLIs under ~/.nvm/versions/node/<version>/bin — enumerate them.
   const nvmVersions = join(homedir(), ".nvm", "versions", "node");
-  if (existsSync(nvmVersions)) dirs.push(nvmVersions); // best-effort; per-version bins resolved below
+  if (existsSync(nvmVersions)) {
+    try {
+      for (const version of readdirSync(nvmVersions)) dirs.push(join(nvmVersions, version, "bin"));
+    } catch {
+      /* best-effort */
+    }
+  }
   return [...new Set(dirs)];
 }
 

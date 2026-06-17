@@ -139,6 +139,43 @@ type EntitySummary = {
   tags: string[];
 };
 
+type AgentSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  provider: string | null;
+  model: string | null;
+  enabled: boolean;
+  schedule: string | null;
+  tags: string[];
+};
+
+type ConversationSummary = {
+  id: string;
+  agent: string;
+  job: string | null;
+  status: "running" | "awaiting_input" | "done" | "failed" | "archived";
+  provider: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  error: string | null;
+};
+
+type ConversationDetail = ConversationSummary & { turns: Array<{ role: string; content: string }> };
+
+type ProviderStatus = {
+  id: string;
+  detection: { available: boolean; version?: string; path?: string; error?: string };
+};
+
+const TASK_LANES: Array<{ key: ConversationSummary["status"]; label: string }> = [
+  { key: "awaiting_input", label: "Your turn" },
+  { key: "running", label: "Running" },
+  { key: "done", label: "Done" },
+  { key: "failed", label: "Failed" },
+  { key: "archived", label: "Archived" }
+];
+
 type RecallResult = {
   type: "memory" | "page_chunk" | "source_chunk";
   id: string;
@@ -424,6 +461,15 @@ export function App() {
   const [versions, setVersions] = useState<PageVersion[]>([]);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [memoryViewOpen, setMemoryViewOpen] = useState(false);
+  const [teamViewOpen, setTeamViewOpen] = useState(false);
+  const [tasksViewOpen, setTasksViewOpen] = useState(false);
+  const [teamAgents, setTeamAgents] = useState<AgentSummary[]>([]);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(null);
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentRunning, setAgentRunning] = useState(false);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [recallQuery, setRecallQuery] = useState("");
@@ -672,9 +718,67 @@ export function App() {
 
   async function openMemoryView() {
     setMemoryViewOpen(true);
+    setTeamViewOpen(false);
+    setTasksViewOpen(false);
     setHistoryOpen(false);
     await loadMemories();
     await loadEntities();
+  }
+
+  async function loadTeam() {
+    const [agentsRes, providersRes] = await Promise.all([fetch("/api/agents"), fetch("/api/providers")]);
+    const agentsData = (await agentsRes.json()) as { agents: AgentSummary[] };
+    const providersData = (await providersRes.json()) as { providers: ProviderStatus[] };
+    setTeamAgents(agentsData.agents);
+    setProviders(providersData.providers);
+    setSelectedAgentSlug((current) =>
+      current && agentsData.agents.some((a) => a.slug === current) ? current : agentsData.agents[0]?.slug ?? null
+    );
+  }
+
+  async function openTeamView() {
+    setTeamViewOpen(true);
+    setMemoryViewOpen(false);
+    setTasksViewOpen(false);
+    setHistoryOpen(false);
+    await loadTeam();
+  }
+
+  async function runSelectedAgent() {
+    if (!selectedAgentSlug || !agentPrompt.trim()) return;
+    setAgentRunning(true);
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: agentPrompt, actor: "web" })
+      });
+      setAgentPrompt("");
+    } finally {
+      setAgentRunning(false);
+    }
+  }
+
+  async function loadConversations() {
+    const response = await fetch("/api/conversations?limit=200");
+    const data = (await response.json()) as { conversations: ConversationSummary[] };
+    setConversations(data.conversations);
+  }
+
+  async function openTasksView() {
+    setTasksViewOpen(true);
+    setMemoryViewOpen(false);
+    setTeamViewOpen(false);
+    setHistoryOpen(false);
+    setSelectedConversation(null);
+    await loadConversations();
+  }
+
+  async function openConversation(id: string) {
+    const response = await fetch(`/api/conversations/${encodeURIComponent(id)}`);
+    if (!response.ok) return;
+    const data = (await response.json()) as { conversation: ConversationDetail };
+    setSelectedConversation(data.conversation);
   }
 
   async function loadEntities() {
@@ -1203,6 +1307,14 @@ export function App() {
           <Icon name="spark" size={14} />
           Memory
         </button>
+        <button className="primaryButton" type="button" onClick={openTeamView}>
+          <Icon name="spark" size={14} />
+          Team
+        </button>
+        <button className="primaryButton" type="button" onClick={openTasksView}>
+          <Icon name="spark" size={14} />
+          Tasks
+        </button>
 
         <nav className="pageList" aria-label="Pages">
           <div
@@ -1338,7 +1450,161 @@ export function App() {
       </aside>
 
       <section className="workspace">
-        {memoryViewOpen ? (
+        {teamViewOpen ? (
+          <div className="memoryWorkspace">
+            <header className="toolbar">
+              <div className="titleStack">
+                <input className="titleInput" value="Team" readOnly />
+                <div className="pageMeta">
+                  <span>{teamAgents.length} agents</span>
+                  <span>
+                    providers: {providers.filter((p) => p.detection.available).map((p) => p.id).join(", ") || "none detected"}
+                  </span>
+                </div>
+              </div>
+              <button className="iconButton" type="button" onClick={() => setTeamViewOpen(false)} title="Close team">
+                <Icon name="doc" size={15} />
+              </button>
+            </header>
+            <div className="memoryGrid">
+              <aside className="memoryPanel">
+                <div className="panelHeader">
+                  <h2>Agents</h2>
+                  <button type="button" onClick={loadTeam}>
+                    Refresh
+                  </button>
+                </div>
+                <div className="memoryList">
+                  {teamAgents.length ? (
+                    teamAgents.map((agent) => (
+                      <button
+                        className={agent.slug === selectedAgentSlug ? "memoryItem active" : "memoryItem"}
+                        key={agent.id}
+                        type="button"
+                        onClick={() => setSelectedAgentSlug(agent.slug)}
+                      >
+                        <span>{agent.name}</span>
+                        <small>
+                          {agent.provider ?? "no provider"}
+                          {agent.enabled ? "" : " · disabled"}
+                          {agent.schedule ? ` · ${agent.schedule}` : ""}
+                        </small>
+                      </button>
+                    ))
+                  ) : (
+                    <p>No agents yet. Add an agents/&lt;slug&gt;.md persona file.</p>
+                  )}
+                </div>
+                {selectedAgentSlug && (
+                  <div className="memoryDetail">
+                    <div className="memoryDetailHeader">
+                      <div>
+                        <strong>{selectedAgentSlug}</strong>
+                        <small>run a prompt against this agent</small>
+                      </div>
+                    </div>
+                    <textarea
+                      className="entityEditor"
+                      value={agentPrompt}
+                      rows={6}
+                      placeholder="Prompt for the agent…"
+                      onChange={(event) => setAgentPrompt(event.target.value)}
+                    />
+                    <button type="button" onClick={runSelectedAgent} disabled={agentRunning || !agentPrompt.trim()}>
+                      {agentRunning ? "Running…" : "Run agent"}
+                    </button>
+                  </div>
+                )}
+              </aside>
+              <aside className="memoryPanel">
+                <div className="panelHeader">
+                  <h2>Providers</h2>
+                </div>
+                <div className="memoryList">
+                  {providers.map((p) => (
+                    <div className="sourceItem" key={p.id}>
+                      <span>
+                        {p.id} {p.detection.available ? "✓" : "✗"}
+                      </span>
+                      <small>{p.detection.available ? p.detection.version ?? p.detection.path : p.detection.error}</small>
+                    </div>
+                  ))}
+                </div>
+              </aside>
+            </div>
+          </div>
+        ) : tasksViewOpen ? (
+          <div className="memoryWorkspace">
+            <header className="toolbar">
+              <div className="titleStack">
+                <input className="titleInput" value="Tasks" readOnly />
+                <div className="pageMeta">
+                  <span>{conversations.length} conversations</span>
+                </div>
+              </div>
+              <button className="iconButton" type="button" onClick={() => setTasksViewOpen(false)} title="Close tasks">
+                <Icon name="doc" size={15} />
+              </button>
+            </header>
+            <div className="memoryGrid">
+              <aside className="memoryPanel">
+                <div className="panelHeader">
+                  <h2>Lanes</h2>
+                  <button type="button" onClick={loadConversations}>
+                    Refresh
+                  </button>
+                </div>
+                {TASK_LANES.map((lane) => {
+                  const laneConversations = conversations.filter((c) => c.status === lane.key);
+                  if (laneConversations.length === 0) return null;
+                  return (
+                    <div className="memoryList" key={lane.key}>
+                      <h3>
+                        {lane.label} ({laneConversations.length})
+                      </h3>
+                      {laneConversations.map((conv) => (
+                        <button
+                          className={conv.id === selectedConversation?.id ? "memoryItem active" : "memoryItem"}
+                          key={conv.id}
+                          type="button"
+                          onClick={() => openConversation(conv.id)}
+                        >
+                          <span>{conv.agent}</span>
+                          <small>
+                            {conv.provider ?? "none"}
+                            {conv.job ? ` · job:${conv.job}` : ""}
+                          </small>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+                {conversations.length === 0 && <p>No conversations yet. Run an agent from Team.</p>}
+              </aside>
+              {selectedConversation && (
+                <aside className="memoryPanel">
+                  <div className="memoryDetail">
+                    <div className="memoryDetailHeader">
+                      <div>
+                        <strong>
+                          {selectedConversation.agent} · {selectedConversation.status}
+                        </strong>
+                        <small>{selectedConversation.startedAt ?? ""}</small>
+                      </div>
+                    </div>
+                    {selectedConversation.error && <p>Error: {selectedConversation.error}</p>}
+                    {selectedConversation.turns.map((turn, index) => (
+                      <div className="sourceItem" key={index}>
+                        <span>{turn.role}</span>
+                        <p>{turn.content}</p>
+                      </div>
+                    ))}
+                  </div>
+                </aside>
+              )}
+            </div>
+          </div>
+        ) : memoryViewOpen ? (
           <div className="memoryWorkspace">
             <header className="toolbar">
               <div className="titleStack">

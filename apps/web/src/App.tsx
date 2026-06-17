@@ -561,6 +561,12 @@ export function App() {
     setOnbError(null);
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
+      // The wizard is re-openable via Setup — don't clobber an existing agent.
+      const existing = await fetch(`/api/agents/${encodeURIComponent(slug)}`);
+      if (existing.ok) {
+        setOnbError(`An agent "${slug}" already exists — choose a different name (or edit it in Team).`);
+        return;
+      }
       const response = await fetch(`/api/agents/${encodeURIComponent(slug)}/file`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },

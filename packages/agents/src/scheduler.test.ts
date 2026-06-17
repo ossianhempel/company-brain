@@ -36,6 +36,7 @@ function harness(initialJobs: Job[], initialAgents: Agent[] = []) {
   const { tasks, scheduleCron } = fakeCron();
   let watchPaths: string[] = [];
   let onChange: (() => void) | null = null;
+  let reindexCalls = 0;
   let runImpl: (input: { agentSlug: string; prompt: string; jobSlug?: string }) => Promise<unknown> = async (input) => {
     runs.push(input);
   };
@@ -44,6 +45,9 @@ function harness(initialJobs: Job[], initialAgents: Agent[] = []) {
     store: { listJobs: async () => jobs, listAgents: async () => agents },
     runAgent: (input) => runImpl(input),
     workspaceDir: "/ws",
+    reindex: async () => {
+      reindexCalls += 1;
+    },
     scheduleCron,
     watch: (paths, cb) => {
       watchPaths = paths;
@@ -57,6 +61,7 @@ function harness(initialJobs: Job[], initialAgents: Agent[] = []) {
     tasks,
     runs,
     get watchPaths() { return watchPaths; },
+    get reindexCalls() { return reindexCalls; },
     triggerWatch: () => onChange?.(),
     setJobs: (j: Job[]) => { jobs = j; },
     setRunImpl: (fn: typeof runImpl) => { runImpl = fn; },
@@ -145,4 +150,13 @@ test("a job with an invalid cron schedule is skipped, not crashed", async () => 
   const h = harness([job({ schedule: "bogus" })]);
   await h.scheduler.start(); // must not throw
   assert.equal(h.active().length, 0);
+});
+
+test("reloadSchedules reindexes canonical files before reading rows", async () => {
+  const h = harness([job()]);
+  await h.scheduler.start();
+  assert.equal(h.reindexCalls >= 1, true); // start reindexed before first reload
+  const before = h.reindexCalls;
+  await h.scheduler.reloadSchedules();
+  assert.equal(h.reindexCalls, before + 1); // every reload reindexes first
 });

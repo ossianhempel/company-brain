@@ -474,9 +474,17 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         result = { status: "failed", turns: [], error: `No provider configured for agent "${input.agentSlug}".` };
       } else {
         const provider = providers.get(providerId);
-        result = provider
-          ? await provider.run({ systemPrompt, prompt: input.prompt, model: agent.model ?? undefined, timeoutMs: input.timeoutMs })
-          : { status: "failed", turns: [], error: `Unknown provider "${providerId}".` };
+        if (!provider) {
+          result = { status: "failed", turns: [], error: `Unknown provider "${providerId}".` };
+        } else {
+          // A provider that throws unexpectedly must still be recorded as a failed
+          // transcript (the audit/recovery contract), never escape this call.
+          try {
+            result = await provider.run({ systemPrompt, prompt: input.prompt, model: agent.model ?? undefined, timeoutMs: input.timeoutMs });
+          } catch (err) {
+            result = { status: "failed", turns: [], error: err instanceof Error ? err.message : String(err) };
+          }
+        }
       }
 
       const doc: ConversationDoc = {

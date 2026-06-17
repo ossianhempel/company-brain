@@ -107,3 +107,19 @@ test("concurrent runs produce two distinct transcripts", async () => {
     assert.equal((await store.listConversations()).length, 2);
   });
 });
+
+test("a provider that throws is recorded as a failed transcript (not escaped)", async () => {
+  await withRun(async (store, registry) => {
+    registry.register({
+      id: "boom",
+      detect: async () => ({ available: true }),
+      run: async () => {
+        throw new Error("provider exploded");
+      },
+    });
+    await store.saveAgentFile("scribe", "x");
+    const conv = await store.runAgent({ agentSlug: "scribe", prompt: "go", providerOverride: "boom" });
+    assert.equal(conv?.status, "failed");
+    assert.match(conv?.error ?? "", /provider exploded/);
+  });
+});

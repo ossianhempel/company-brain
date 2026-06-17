@@ -119,6 +119,7 @@ const scheduler = createScheduler({
   store: agents,
   runAgent: (input) => agents.runAgent(input),
   workspaceDir,
+  reindex: () => reindexAllAgentAreas(db, workspace),
 });
 if (process.env.COMPANY_BRAIN_DISABLE_SCHEDULER !== "1") {
   await scheduler.start();

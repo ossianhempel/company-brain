@@ -25,6 +25,12 @@ export interface SchedulerDeps {
   store: { listJobs(): Promise<Job[]>; listAgents(): Promise<Agent[]> };
   runAgent: (input: { agentSlug: string; prompt: string; jobSlug?: string; providerOverride?: string }) => Promise<unknown>;
   workspaceDir: string;
+  /**
+   * Reindex the agent/job/conversation file areas before (re)building schedules,
+   * so out-of-band file edits (hand-authored files, git pull) that bypass the
+   * server writer are picked up. The server wires this to reindexAllAgentAreas.
+   */
+  reindex?: () => Promise<void>;
   /** Defaults to node-cron. */
   scheduleCron?: (expr: string, fn: () => void) => CronTask;
   /** Defaults to chokidar. */
@@ -74,6 +80,14 @@ export function createScheduler(deps: SchedulerDeps) {
   }
 
   async function reloadSchedules(): Promise<void> {
+    // Pick up out-of-band file changes before reading the derived rows.
+    if (deps.reindex) {
+      try {
+        await deps.reindex();
+      } catch (err) {
+        console.warn(`[scheduler] reindex before reload failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
     for (const task of tasks) task.stop();
     tasks = [];
 

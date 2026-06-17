@@ -9,6 +9,7 @@ import { buildConversationFile, parseConversation, type ConversationDoc, type Co
 export * from "./agent-file.ts";
 export * from "./job-file.ts";
 export * from "./conversation-file.ts";
+export * from "./provider.ts";
 
 // ---------------------------------------------------------------------------
 // Reindex — the derived index of the agents/jobs/conversations workspace files.

@@ -376,7 +376,12 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
     },
 
     /** Save a raw human edit of an agent file through the single writer -> reindex. */
-    async saveAgentFile(slug: string, markdown: string, actor = "local-user"): Promise<Agent | null> {
+    async saveAgentFile(
+      slug: string,
+      markdown: string,
+      actor = "local-user",
+      patch?: { name?: string; provider?: string; model?: string; enabled?: boolean }
+    ): Promise<Agent | null> {
       if (!fileMode) throw new Error("Editing agent files requires file mode (gitWriter + workspace).");
       const ws = workspace!;
       await gitWriter!.enqueue({
@@ -385,7 +390,14 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         actor: { name: actor },
         write: async () => {
           const cur = await ws.readAgent(slug);
-          const frontmatter = cur?.frontmatter ?? { id: undefined, title: slug };
+          // Preserve existing frontmatter identity/config; apply the patch (lets the
+          // UI set provider/model/name/enabled, not just the system-prompt body).
+          const base = cur?.frontmatter ?? ({ id: undefined, title: slug } as Record<string, unknown>);
+          const frontmatter: Record<string, unknown> = { ...base };
+          if (patch?.name !== undefined) frontmatter.title = patch.name;
+          if (patch?.provider !== undefined) frontmatter.provider = patch.provider;
+          if (patch?.model !== undefined) frontmatter.model = patch.model;
+          if (patch?.enabled !== undefined) frontmatter.enabled = patch.enabled;
           await ws.writeAgent(slug, { frontmatter, markdown }, new Date().toISOString());
         },
       });

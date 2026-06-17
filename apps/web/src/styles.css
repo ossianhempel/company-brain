@@ -1475,3 +1475,61 @@ textarea {
 .laneCardActions button:hover {
   background: var(--color-selected);
 }
+
+/* Phase 4: onboarding wizard */
+.onboardingOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.onboardingCard {
+  width: min(520px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.onboardingHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.onboardingStep {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.onboardingStep label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-default);
+}
+.onboardingActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.sidebarSetupButton {
+  margin-top: auto;
+  font-size: 12px;
+  color: var(--color-subtle);
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 6px 2px;
+  cursor: pointer;
+}
+.sidebarSetupButton:hover {
+  color: var(--color-default);
+}

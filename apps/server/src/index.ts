@@ -186,8 +186,22 @@ app.get("/api/agents/:slug/file", async (c) => {
 // itself execute anything. Host execution only happens via the opt-in scheduler
 // or the opt-in run API. Authn/RBAC for all writes is Phase 5.
 app.put("/api/agents/:slug/file", async (c) => {
-  const body = z.object({ markdown: z.string(), actor: z.string().min(1).optional() }).parse(await c.req.json());
-  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor);
+  const body = z
+    .object({
+      markdown: z.string(),
+      actor: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
+      provider: z.string().optional(),
+      model: z.string().optional(),
+      enabled: z.boolean().optional()
+    })
+    .parse(await c.req.json());
+  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor, {
+    name: body.name,
+    provider: body.provider,
+    model: body.model,
+    enabled: body.enabled
+  });
   return c.json({ agent });
 });
 

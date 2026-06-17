@@ -486,6 +486,13 @@ export function App() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
   const [boardError, setBoardError] = useState<string | null>(null);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onbStep, setOnbStep] = useState(0);
+  const [onbName, setOnbName] = useState("Scribe");
+  const [onbProvider, setOnbProvider] = useState("");
+  const [onbPersona, setOnbPersona] = useState("You are a helpful company-brain agent. Be concise and cite sources.");
+  const [onbBusy, setOnbBusy] = useState(false);
+  const [onbError, setOnbError] = useState<string | null>(null);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [recallQuery, setRecallQuery] = useState("");
@@ -522,6 +529,54 @@ export function App() {
   const dirtyRef = useRef(false);
   const loadingPageRef = useRef(false);
   const draggingPageIdRef = useRef<string | null>(null);
+
+  // First-run onboarding: show the wizard when there are no agents yet and the
+  // user hasn't dismissed it. Detection uses only existing read endpoints.
+  useEffect(() => {
+    if (typeof localStorage !== "undefined" && localStorage.getItem("cb.onboarded")) return;
+    void (async () => {
+      const agentsRes = await fetch("/api/agents");
+      if (!agentsRes.ok) return;
+      const { agents: existing } = (await agentsRes.json()) as { agents: AgentSummary[] };
+      if (existing.length > 0) return;
+      const providersRes = await fetch("/api/providers");
+      if (providersRes.ok) {
+        const { providers: detected } = (await providersRes.json()) as { providers: ProviderStatus[] };
+        setProviders(detected);
+        setOnbProvider(detected.find((p) => p.detection.available)?.id ?? detected[0]?.id ?? "");
+      }
+      setOnboardingOpen(true);
+    })();
+  }, []);
+
+  function dismissOnboarding() {
+    if (typeof localStorage !== "undefined") localStorage.setItem("cb.onboarded", "1");
+    setOnboardingOpen(false);
+  }
+
+  async function createFirstAgent() {
+    const name = onbName.trim();
+    if (!name) return;
+    setOnbBusy(true);
+    setOnbError(null);
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
+      const response = await fetch(`/api/agents/${encodeURIComponent(slug)}/file`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markdown: onbPersona, name, provider: onbProvider || undefined, actor: "web" })
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setOnbError(body.error ?? `Create failed (${response.status})`);
+        return;
+      }
+      dismissOnboarding();
+      await openTeamView();
+    } finally {
+      setOnbBusy(false);
+    }
+  }
 
   useEffect(() => {
     titleRef.current = title;
@@ -1445,6 +1500,17 @@ export function App() {
             {memoryViewOpen ? "Back to pages" : "Memory"}
           </button>
         )}
+        <button
+          className="sidebarSetupButton"
+          type="button"
+          onClick={() => {
+            setOnbStep(0);
+            setOnbError(null);
+            setOnboardingOpen(true);
+          }}
+        >
+          Setup
+        </button>
 
         {!teamViewOpen && !tasksViewOpen && (
         <nav className="pageList" aria-label="Pages">
@@ -2462,6 +2528,80 @@ export function App() {
           </>
         )}
       </section>
+
+      {onboardingOpen && (
+        <div className="onboardingOverlay" role="dialog" aria-modal="true">
+          <div className="onboardingCard">
+            <div className="onboardingHeader">
+              <strong>Welcome to Company Brain</strong>
+              <button type="button" onClick={dismissOnboarding} title="Skip setup">
+                Skip
+              </button>
+            </div>
+
+            {onbStep === 0 && (
+              <div className="onboardingStep">
+                <h3>1 · Agent providers</h3>
+                <p>Company Brain runs agents through the agent CLIs installed on this host.</p>
+                <div className="memoryList">
+                  {providers.map((p) => (
+                    <div className="sourceItem" key={p.id}>
+                      <span>
+                        {p.id} {p.detection.available ? "✓ available" : "✗ not found"}
+                      </span>
+                      <small>{p.detection.available ? p.detection.version ?? p.detection.path : p.detection.error}</small>
+                    </div>
+                  ))}
+                  {providers.length === 0 && <p className="laneEmpty">No providers detected.</p>}
+                </div>
+                <button type="button" onClick={() => setOnbStep(1)}>
+                  Next
+                </button>
+              </div>
+            )}
+
+            {onbStep === 1 && (
+              <div className="onboardingStep">
+                <h3>2 · Create your first agent</h3>
+                <label>
+                  Name
+                  <input value={onbName} onChange={(event) => setOnbName(event.target.value)} placeholder="Scribe" />
+                </label>
+                <label>
+                  Provider
+                  <select value={onbProvider} onChange={(event) => setOnbProvider(event.target.value)}>
+                    <option value="">(none)</option>
+                    {providers.map((p) => (
+                      <option key={p.id} value={p.id} disabled={!p.detection.available}>
+                        {p.id}
+                        {p.detection.available ? "" : " (not found)"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Persona (system prompt)
+                  <textarea
+                    className="entityEditor"
+                    rows={5}
+                    value={onbPersona}
+                    onChange={(event) => setOnbPersona(event.target.value)}
+                  />
+                </label>
+                {onbError && <p className="runError">{onbError}</p>}
+                <div className="onboardingActions">
+                  <button type="button" onClick={() => setOnbStep(0)}>
+                    Back
+                  </button>
+                  <button type="button" onClick={createFirstAgent} disabled={onbBusy || !onbName.trim()}>
+                    {onbBusy ? "Creating…" : "Create agent"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

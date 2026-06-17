@@ -1690,7 +1690,9 @@ export function App() {
                       </button>
                     ))
                   ) : (
-                    <p>No agents yet. Add an agents/&lt;slug&gt;.md persona file.</p>
+                    <p className="laneEmpty">
+                      No agents yet — use <strong>Setup</strong> to create your first one.
+                    </p>
                   )}
                 </div>
                 <div className="panelHeader">
@@ -1765,7 +1767,15 @@ export function App() {
                     <h3>Run history</h3>
                     {agentRuns.length ? (
                       agentRuns.map((run) => (
-                        <button className="memoryItem" key={run.id} type="button" onClick={() => { setTasksViewOpen(true); setTeamViewOpen(false); openConversation(run.id); }}>
+                        <button
+                          className="memoryItem"
+                          key={run.id}
+                          type="button"
+                          onClick={async () => {
+                            await openTasksView();
+                            await openConversation(run.id);
+                          }}
+                        >
                           <span>{run.status}</span>
                           <small>{run.startedAt ?? ""}</small>
                         </button>

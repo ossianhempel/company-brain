@@ -1322,6 +1322,10 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .taskBoardGrid {
+    grid-template-columns: 1fr;
+  }
+
   .previewPane {
     grid-template-columns: 1fr;
   }

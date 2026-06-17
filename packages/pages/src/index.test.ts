@@ -500,6 +500,20 @@ test("file mode (U8): parentPageId and attribution survive a full reindex", asyn
   });
 });
 
+test("file mode: create refuses to overwrite an existing file at the slug path", async () => {
+  await withFilePageStore(async (pages, { wsDir }) => {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    // Simulate a file already committed at the slug a concurrent create would pick.
+    await mkdir(join(wsDir, "pages"), { recursive: true });
+    await writeFile(
+      join(wsDir, "pages", "dup.md"),
+      "---\nid: 22222222-2222-2222-2222-222222222222\ntitle: Dup\ncreated: x\nupdated: x\n---\n# Dup\n",
+      "utf8"
+    );
+    await assert.rejects(() => pages.create({ title: "Dup", html: "<h1>Dup</h1>", actor: "a" }));
+  });
+});
+
 test("file mode: startup does not overwrite an edited home.md", async () => {
   const wsDir = await mkdtemp(join(tmpdir(), "company-brain-home-ws-"));
   const dbDir = await mkdtemp(join(tmpdir(), "company-brain-home-db-"));

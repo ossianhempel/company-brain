@@ -1007,7 +1007,12 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
    * rebuildable from the file alone. On a rename, the old file is removed in the
    * same commit.
    */
-  async function writePageFile(page: Page, actor: string, oldSlug?: string): Promise<void> {
+  async function writePageFile(
+    page: Page,
+    actor: string,
+    oldSlug?: string,
+    exclusive = false
+  ): Promise<void> {
     if (!fileMode) return;
     const ws = workspace!;
     const markdown = ws.htmlToMarkdown(page.html);
@@ -1036,13 +1041,14 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
       ...(previousSlugs.length ? { previousSlugs } : {}),
     };
     const paths = [ws.pageFilePath(page.slug)];
-    if (renamed) paths.push(ws.pageFilePath(renamed));
+    // Stage both old-path variants so a rename removes a directory-index page too.
+    if (renamed) paths.push(ws.pageFilePath(renamed), ws.dirIndexPath(renamed));
     await gitWriter!.enqueue({
       paths,
       message: `save ${page.slug}`,
       actor: { name: actor },
       write: async () => {
-        await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt);
+        await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt, { exclusive });
         if (renamed) await ws.deletePage(renamed);
       },
     });
@@ -1053,10 +1059,15 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
    * it via reindex (the single index writer). Returns the reindexed page so the
    * DB never leads the canonical files.
    */
-  async function persistPageFileMode(page: Page, actor: string, oldSlug?: string): Promise<Page> {
+  async function persistPageFileMode(
+    page: Page,
+    actor: string,
+    oldSlug?: string,
+    exclusive = false
+  ): Promise<Page> {
     // writePageFile commits, and the git writer's commit hook reindexes inside
     // the same serialized mutation, so the DB is current once this resolves.
-    await writePageFile(page, actor, oldSlug);
+    await writePageFile(page, actor, oldSlug, exclusive);
     return (await getBySlug(page.slug)) ?? page;
   }
 
@@ -1065,7 +1076,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     if (!fileMode) return;
     const ws = workspace!;
     await gitWriter!.enqueue({
-      paths: [ws.pageFilePath(slug)],
+      paths: [ws.pageFilePath(slug), ws.dirIndexPath(slug)], // both variants
       message: `delete ${slug}`,
       actor: { name: actor },
       write: async () => {
@@ -1716,7 +1727,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
           owner: input.owner?.trim() || actor,
           permissionNote: input.permissionNote?.trim() || null,
         };
-        const saved = await persistPageFileMode(page, actor);
+        const saved = await persistPageFileMode(page, actor, undefined, true); // exclusive create
         await recordPageActivity(pageDb, id, "page.created", `Created ${saved.title}`, actor);
         return saved;
       }
@@ -1780,7 +1791,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
           owner: input.owner?.trim() || actor,
           permissionNote: input.permissionNote?.trim() || null,
         };
-        const saved = await persistPageFileMode(page, actor);
+        const saved = await persistPageFileMode(page, actor, undefined, true); // exclusive create
         await recordPageActivity(pageDb, id, "page.created", `Created ${saved.title}`, actor);
         return saved;
       }

@@ -203,7 +203,13 @@ export function createGitWriter(options: GitWriterOptions) {
       if (existsSync(join(dir, filepath))) {
         await git.add({ fs, dir, filepath });
       } else {
-        await git.remove({ fs, dir, filepath });
+        // Removing a path that isn't tracked (e.g. a delete-variant that never
+        // existed) is a no-op, not an error.
+        try {
+          await git.remove({ fs, dir, filepath });
+        } catch {
+          /* path not tracked */
+        }
       }
     }
 

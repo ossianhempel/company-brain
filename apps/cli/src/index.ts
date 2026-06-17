@@ -230,6 +230,19 @@ async function ingestArtifact(input: {
   });
 }
 
+/**
+ * Direct-mode page store with the file-backed writer wired in, so offline
+ * `--direct` writes commit markdown to data/workspace (not DB-only, which the
+ * next reindex would tombstone).
+ */
+async function directPageStore() {
+  const workspaceDir = resolveWorkspaceDir();
+  return createPageStore(await createDb(), {
+    gitWriter: createGitWriter({ workspaceDir }),
+    workspace: createWorkspace({ workspaceDir }),
+  });
+}
+
 async function resolvePage(ref: string) {
   const pages = await createPageStore();
   const byId = await pages.get(ref);
@@ -579,7 +592,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ title, html, actor })
         })).page
-      : await (await createPageStore()).create({ title, html, actor });
+      : await (await directPageStore()).create({ title, html, actor });
     printJson({ page });
     return;
   }
@@ -605,7 +618,7 @@ async function main() {
           method: "PUT",
           body: JSON.stringify(body)
         })).page
-      : await (await createPageStore()).update(current.id, body);
+      : await (await directPageStore()).update(current.id, body);
     printJson({ page });
     return;
   }
@@ -627,7 +640,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ actor })
         })).page
-      : await (await createPageStore()).duplicate(current.id, actor);
+      : await (await directPageStore()).duplicate(current.id, actor);
     printJson({ page });
     return;
   }
@@ -658,7 +671,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ parentPageId, actor })
         })).page
-      : await (await createPageStore()).move(current.id, { parentPageId, actor });
+      : await (await directPageStore()).move(current.id, { parentPageId, actor });
     printJson({ page });
     return;
   }
@@ -679,7 +692,7 @@ async function main() {
           method: "DELETE",
           body: JSON.stringify({ actor: flagString(flags, "actor") ?? "cli" })
         })).page
-      : await (await createPageStore()).softDelete(current.id, flagString(flags, "actor") ?? "cli");
+      : await (await directPageStore()).softDelete(current.id, flagString(flags, "actor") ?? "cli");
     printJson({ page });
     return;
   }
@@ -701,7 +714,7 @@ async function main() {
           method: "POST",
           body: JSON.stringify({ actor })
         })).page
-      : await (await createPageStore()).restoreVersion(current.id, versionId, actor);
+      : await (await directPageStore()).restoreVersion(current.id, versionId, actor);
     if (!page) {
       throw new Error(`Page version not found: ${ref} ${versionId}`);
     }

@@ -1,4 +1,5 @@
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -127,12 +128,29 @@ test("listPageSlugs walks the pages tree and normalizes slugs", async () => {
   });
 });
 
-test("readPage backfills a stable id for a legacy file without one", async () => {
+test("readPage backfills a stable id for a legacy file and persists it", async () => {
+  const { readFile } = await import("node:fs/promises");
   await withWorkspace(async (ws, dir) => {
     await mkdir(join(dir, "pages"), { recursive: true });
     await writeFile(join(dir, "pages", "legacy.md"), "---\ntitle: Legacy\n---\n# Legacy\n", "utf8");
-    const read = await ws.readPage("legacy");
-    assert.ok(read);
-    assert.match(read.frontmatter.id, /[0-9a-f-]{36}/);
+    const first = await ws.readPage("legacy");
+    assert.ok(first);
+    assert.match(first.frontmatter.id, /[0-9a-f-]{36}/);
+
+    // The id is now written back, so a second read returns the same id.
+    const onDisk = await readFile(join(dir, "pages", "legacy.md"), "utf8");
+    assert.match(onDisk, new RegExp(`id: ${first.frontmatter.id}`));
+    const second = await ws.readPage("legacy");
+    assert.equal(second?.frontmatter.id, first.frontmatter.id);
+  });
+});
+
+test("deletePage removes the directory-index variant too", async () => {
+  await withWorkspace(async (ws, dir) => {
+    await mkdir(join(dir, "pages", "dir"), { recursive: true });
+    await writeFile(join(dir, "pages", "dir", "index.md"), "---\nid: x\ntitle: D\n---\n# D\n", "utf8");
+    const removed = await ws.deletePage("dir");
+    assert.deepEqual(removed, ["pages/dir/index.md"]);
+    assert.equal(existsSync(join(dir, "pages", "dir", "index.md")), false);
   });
 });

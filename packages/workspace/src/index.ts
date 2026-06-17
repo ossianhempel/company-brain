@@ -163,10 +163,15 @@ export function createWorkspace(options: WorkspaceOptions) {
       if (!existsSync(abs)) continue;
       const parsed = matter(await readFile(abs, "utf8"));
       const fm = parsed.data as Partial<PageFrontmatter>;
-      return {
-        frontmatter: { ...fm, id: ensureId(fm) } as PageFrontmatter,
-        markdown: parsed.content.trim() + "\n",
-      };
+      const markdown = parsed.content.trim() + "\n";
+      if (!fm.id) {
+        // Persist a stable id once, so repeated reads/reindexes of a file that
+        // lacked one (e.g. hand-created/imported) don't churn a new id each time.
+        const id = randomUUID();
+        await writeFile(abs, matter.stringify(markdown, { ...fm, id }), "utf8");
+        return { frontmatter: { ...fm, id } as PageFrontmatter, markdown };
+      }
+      return { frontmatter: fm as PageFrontmatter, markdown };
     }
     return null;
   }
@@ -179,7 +184,8 @@ export function createWorkspace(options: WorkspaceOptions) {
   async function writePage(
     slug: string,
     input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
-    now: string
+    now: string,
+    options: { exclusive?: boolean } = {}
   ): Promise<{ relPath: string; frontmatter: PageFrontmatter }> {
     const relPath = pageFilePath(slug);
     const abs = join(root, relPath);
@@ -194,16 +200,26 @@ export function createWorkspace(options: WorkspaceOptions) {
     } as PageFrontmatter;
 
     const body = input.markdown.trim() + "\n";
-    await writeFile(abs, matter.stringify(body, frontmatter), "utf8");
+    // Exclusive creates fail (EEXIST) rather than overwrite, so a concurrent
+    // same-slug create can't clobber an already-written canonical file.
+    await writeFile(abs, matter.stringify(body, frontmatter), {
+      encoding: "utf8",
+      flag: options.exclusive ? "wx" : "w",
+    });
     return { relPath, frontmatter };
   }
 
-  /** Remove a page file. Returns the repo-relative path removed (for staging). */
-  async function deletePage(slug: string): Promise<string> {
-    const relPath = pageFilePath(slug);
-    const abs = join(root, relPath);
-    if (existsSync(abs)) await rm(abs, { force: true });
-    return relPath;
+  /** Remove a page file (both the standalone and directory-index variants). */
+  async function deletePage(slug: string): Promise<string[]> {
+    const removed: string[] = [];
+    for (const rel of [pageFilePath(slug), dirIndexPath(slug)]) {
+      const abs = join(root, rel);
+      if (existsSync(abs)) {
+        await rm(abs, { force: true });
+        removed.push(rel);
+      }
+    }
+    return removed;
   }
 
   /** All page slugs on disk (recursive walk of the pages dir). */
@@ -229,6 +245,7 @@ export function createWorkspace(options: WorkspaceOptions) {
 
   return {
     pageFilePath,
+    dirIndexPath,
     slugFromPath,
     htmlToMarkdown,
     markdownToHtml,

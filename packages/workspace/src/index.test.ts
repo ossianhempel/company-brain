@@ -242,3 +242,14 @@ test("new-area writers reject path-traversal slugs", async () => {
     assert.throws(() => ws.jobFilePath("../escape"));
   });
 });
+
+test("raw helpers reject unsafe area / extension (not just slug)", async () => {
+  await withWorkspace(async (ws) => {
+    await assert.rejects(() => ws.writeRawIn("..", "outside", "txt", "x"));
+    await assert.rejects(() => ws.writeRawIn("jobs", "ok", "../../evil", "x"));
+    assert.throws(() => ws.jobFilePath("../escape")); // slug still guarded
+    // a legit raw write still works
+    await ws.writeRawIn("jobs", "ok", "yaml", "name: ok\n");
+    assert.equal(await ws.readRawIn("jobs", "ok", "yaml"), "name: ok\n");
+  });
+});

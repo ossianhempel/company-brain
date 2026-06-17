@@ -314,7 +314,17 @@ export function createWorkspace(options: WorkspaceOptions) {
   // the path-safety + git-staging contract but skip frontmatter stamping and
   // the markdown `.md` assumption.
 
+  // area and ext are single path segments (no nesting/traversal) — validate them
+  // too, since the raw helpers are public and take them as arguments.
+  function assertSafeSegment(value: string, label: string): void {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+      throw new Error(`Unsafe workspace ${label}: ${JSON.stringify(value)}`);
+    }
+  }
+
   function rawFilePath(area: string, slug: string, ext: string): string {
+    assertSafeSegment(area, "area");
+    assertSafeSegment(ext, "extension");
     assertSafeSlug(slug);
     return `${area}/${slug}.${ext}`;
   }

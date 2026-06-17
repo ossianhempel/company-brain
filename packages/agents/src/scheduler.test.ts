@@ -194,3 +194,22 @@ test("a oneShot job is not rescheduled after it has run (reload/restart safe)", 
   await h.scheduler.reloadSchedules(); // a later reload / restart
   assert.equal(h.active().length, 0); // not rescheduled — it already ran
 });
+
+test("a oneShot job is not rescheduled while its first run is still in-flight", async () => {
+  const h = harness([job({ oneShot: true })]);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  h.setRunImpl(async (input) => {
+    h.runs.push(input);
+    await gate; // run stays in-flight (no conversation yet)
+  });
+  await h.scheduler.start();
+  h.tasks[0].fn(); // fire — now running, not yet complete
+  await flush();
+  assert.equal(h.scheduler.runningCount(), 1);
+
+  await h.scheduler.reloadSchedules(); // reload mid-run
+  assert.equal(h.active().length, 0); // not rescheduled while running
+  release();
+  await flush();
+});

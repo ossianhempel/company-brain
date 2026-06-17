@@ -105,9 +105,10 @@ export function createScheduler(deps: SchedulerDeps) {
 
     const jobs = (await deps.store.listJobs()).filter((j) => j.enabled);
     for (const job of jobs) {
-      // A one-shot that already produced a conversation must not be rescheduled
-      // on reload/restart (the cron stop alone isn't durable).
-      if (job.oneShot && (await deps.store.hasJobRun(job.slug))) continue;
+      // A one-shot that already ran (durable: a conversation exists) OR is still
+      // running in this process must not be rescheduled — otherwise a reload mid-run
+      // would queue a replacement that fires a second time after the first completes.
+      if (job.oneShot && (running.has(`job:${job.slug}`) || (await deps.store.hasJobRun(job.slug)))) continue;
       let task: CronTask | null = null;
       const fn = () =>
         fire(

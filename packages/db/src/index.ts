@@ -528,6 +528,7 @@ async function migrateDb(db: CompanyBrainDb) {
       agent_slug text not null default '',
       prompt text not null default '',
       provider text,
+      timeout_ms integer,
       one_shot boolean not null default false,
       content_hash text,
       created_at timestamptz not null default now(),

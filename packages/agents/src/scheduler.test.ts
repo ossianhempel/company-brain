@@ -14,6 +14,7 @@ const job = (over: Partial<Job> = {}): Job => ({
   agent: "scribe",
   prompt: "do it",
   provider: null,
+  timeoutMs: null,
   oneShot: false,
   ...over,
 });
@@ -76,7 +77,15 @@ test("a job whose cron fires invokes runAgent with the job's agent + prompt", as
   h.active()[0].fn();
   await flush();
   assert.equal(h.runs.length, 1);
-  assert.deepEqual(h.runs[0], { agentSlug: "scribe", prompt: "summarize", jobSlug: "nightly", providerOverride: undefined });
+  assert.deepEqual(h.runs[0], { agentSlug: "scribe", prompt: "summarize", jobSlug: "nightly", providerOverride: undefined, timeoutMs: undefined });
+});
+
+test("a job's timeoutMs is passed through to runAgent", async () => {
+  const h = harness([job({ timeoutMs: 30000 })]);
+  await h.scheduler.start();
+  h.active()[0].fn();
+  await flush();
+  assert.equal((h.runs[0] as { timeoutMs?: number }).timeoutMs, 30000);
 });
 
 test("start watches the agents + jobs directories", async () => {

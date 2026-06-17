@@ -23,7 +23,13 @@ export interface FsWatcher {
 
 export interface SchedulerDeps {
   store: { listJobs(): Promise<Job[]>; listAgents(): Promise<Agent[]> };
-  runAgent: (input: { agentSlug: string; prompt: string; jobSlug?: string; providerOverride?: string }) => Promise<unknown>;
+  runAgent: (input: {
+    agentSlug: string;
+    prompt: string;
+    jobSlug?: string;
+    providerOverride?: string;
+    timeoutMs?: number;
+  }) => Promise<unknown>;
   workspaceDir: string;
   /**
    * Reindex the agent/job/conversation file areas before (re)building schedules,
@@ -97,7 +103,14 @@ export function createScheduler(deps: SchedulerDeps) {
       const fn = () =>
         fire(
           `job:${job.slug}`,
-          () => deps.runAgent({ agentSlug: job.agent, prompt: job.prompt, jobSlug: job.slug, providerOverride: job.provider ?? undefined }),
+          () =>
+            deps.runAgent({
+              agentSlug: job.agent,
+              prompt: job.prompt,
+              jobSlug: job.slug,
+              providerOverride: job.provider ?? undefined,
+              timeoutMs: job.timeoutMs ?? undefined,
+            }),
           job.oneShot ? () => task?.stop() : undefined
         );
       task = safeSchedule(job.schedule, fn, `job:${job.slug}`);

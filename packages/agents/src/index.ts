@@ -84,15 +84,15 @@ export async function reindexJobs(db: CompanyBrainDb, workspace: Workspace, slug
     await db.query("update jobs set deleted_at = now() where slug = $1 and id <> $2 and deleted_at is null", [slug, doc.id]);
     await db.query(
       `
-        insert into jobs (id, slug, name, enabled, schedule, agent_slug, prompt, provider, one_shot, content_hash)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        insert into jobs (id, slug, name, enabled, schedule, agent_slug, prompt, provider, timeout_ms, one_shot, content_hash)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         on conflict (id) do update set
           slug = excluded.slug, name = excluded.name, enabled = excluded.enabled,
           schedule = excluded.schedule, agent_slug = excluded.agent_slug, prompt = excluded.prompt,
-          provider = excluded.provider, one_shot = excluded.one_shot,
+          provider = excluded.provider, timeout_ms = excluded.timeout_ms, one_shot = excluded.one_shot,
           content_hash = excluded.content_hash, updated_at = now(), deleted_at = null
       `,
-      [doc.id, slug, doc.name, doc.enabled, doc.schedule, doc.agent, doc.prompt, doc.provider ?? null, doc.oneShot ?? false, hash]
+      [doc.id, slug, doc.name, doc.enabled, doc.schedule, doc.agent, doc.prompt, doc.provider ?? null, doc.timeoutMs ?? null, doc.oneShot ?? false, hash]
     );
   }
 }
@@ -227,6 +227,7 @@ export interface Job {
   agent: string;
   prompt: string;
   provider: string | null;
+  timeoutMs: number | null;
   oneShot: boolean;
 }
 
@@ -263,6 +264,7 @@ type JobRow = {
   agent_slug: string;
   prompt: string;
   provider: string | null;
+  timeout_ms: number | null;
   one_shot: boolean;
 };
 
@@ -311,6 +313,7 @@ function toJob(row: JobRow): Job {
     agent: row.agent_slug,
     prompt: row.prompt,
     provider: row.provider,
+    timeoutMs: row.timeout_ms,
     oneShot: row.one_shot,
   };
 }

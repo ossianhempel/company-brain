@@ -1,0 +1,104 @@
+import { join } from "node:path";
+import cron from "node-cron";
+import chokidar from "chokidar";
+import type { Agent, Job } from "./index.ts";
+
+// ---------------------------------------------------------------------------
+// In-process scheduler — runs enabled jobs (and agent heartbeats) on their cron
+// schedules via node-cron; a chokidar watcher on agents/ + jobs/ reloads the
+// schedule set when files change. No separate daemon (one-container default).
+// The cron + watch boundaries are injectable so ticks/reloads are deterministic
+// in tests.
+// ---------------------------------------------------------------------------
+
+const HEARTBEAT_PROMPT = "Perform your scheduled routine.";
+
+export interface CronTask {
+  stop: () => void;
+}
+
+export interface FsWatcher {
+  close: () => void | Promise<void>;
+}
+
+export interface SchedulerDeps {
+  store: { listJobs(): Promise<Job[]>; listAgents(): Promise<Agent[]> };
+  runAgent: (input: { agentSlug: string; prompt: string; jobSlug?: string; providerOverride?: string }) => Promise<unknown>;
+  workspaceDir: string;
+  /** Defaults to node-cron. */
+  scheduleCron?: (expr: string, fn: () => void) => CronTask;
+  /** Defaults to chokidar. */
+  watch?: (paths: string[], onChange: () => void) => FsWatcher;
+}
+
+export function createScheduler(deps: SchedulerDeps) {
+  const scheduleCron = deps.scheduleCron ?? ((expr, fn) => cron.schedule(expr, fn) as unknown as CronTask);
+  const watchFactory =
+    deps.watch ??
+    ((paths, onChange) => {
+      const w = chokidar.watch(paths, { ignoreInitial: true });
+      w.on("all", onChange);
+      return w;
+    });
+
+  let tasks: CronTask[] = [];
+  let watcher: FsWatcher | null = null;
+  const running = new Set<string>();
+  let reloadChain: Promise<void> = Promise.resolve();
+
+  function fire(key: string, run: () => Promise<unknown>, deregister?: () => void): void {
+    if (deregister) deregister(); // oneShot: stop before running so it never re-fires
+    if (running.has(key)) return; // overlap guard
+    running.add(key);
+    void Promise.resolve()
+      .then(run)
+      .catch(() => {
+        /* a run failure is recorded as a failed transcript by runAgent; never crash the scheduler */
+      })
+      .finally(() => running.delete(key));
+  }
+
+  async function reloadSchedules(): Promise<void> {
+    for (const task of tasks) task.stop();
+    tasks = [];
+
+    const jobs = (await deps.store.listJobs()).filter((j) => j.enabled);
+    for (const job of jobs) {
+      let task: CronTask;
+      const fn = () =>
+        fire(
+          `job:${job.slug}`,
+          () => deps.runAgent({ agentSlug: job.agent, prompt: job.prompt, jobSlug: job.slug, providerOverride: job.provider ?? undefined }),
+          job.oneShot ? () => task?.stop() : undefined
+        );
+      task = scheduleCron(job.schedule, fn);
+      tasks.push(task);
+    }
+
+    const agents = (await deps.store.listAgents()).filter((a) => a.enabled && a.schedule);
+    for (const agent of agents) {
+      const task = scheduleCron(agent.schedule!, () =>
+        fire(`agent:${agent.slug}`, () => deps.runAgent({ agentSlug: agent.slug, prompt: HEARTBEAT_PROMPT, providerOverride: agent.provider ?? undefined }))
+      );
+      tasks.push(task);
+    }
+  }
+
+  return {
+    async start(): Promise<void> {
+      await reloadSchedules();
+      watcher = watchFactory([join(deps.workspaceDir, "agents"), join(deps.workspaceDir, "jobs")], () => {
+        reloadChain = reloadChain.then(reloadSchedules).catch(() => {});
+      });
+    },
+    async stop(): Promise<void> {
+      for (const task of tasks) task.stop();
+      tasks = [];
+      if (watcher) await watcher.close();
+      watcher = null;
+    },
+    reloadSchedules,
+    taskCount: () => tasks.length,
+    runningCount: () => running.size,
+  };
+}

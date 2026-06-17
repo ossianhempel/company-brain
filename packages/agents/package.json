@@ -8,14 +8,15 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test --test-concurrency=1 src/agent-file.test.ts src/job-file.test.ts src/conversation-file.test.ts src/reindex.test.ts src/provider.test.ts src/providers/local-cli.test.ts src/store.test.ts src/run.test.ts src/index.test.ts"
+    "test": "tsx --test --test-concurrency=1 src/agent-file.test.ts src/job-file.test.ts src/conversation-file.test.ts src/reindex.test.ts src/provider.test.ts src/providers/local-cli.test.ts src/store.test.ts src/run.test.ts src/scheduler.test.ts src/index.test.ts"
   },
   "dependencies": {
     "@company-brain/db": "workspace:*",
     "@company-brain/git-writer": "workspace:*",
     "@company-brain/workspace": "workspace:*",
     "node-cron": "^3.0.3",
-    "yaml": "^2.6.1"
+    "yaml": "^2.6.1",
+    "chokidar": "^4.0.3"
   },
   "devDependencies": {
     "@types/node-cron": "^3.0.11",

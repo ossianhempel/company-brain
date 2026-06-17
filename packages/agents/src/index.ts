@@ -84,15 +84,15 @@ export async function reindexJobs(db: CompanyBrainDb, workspace: Workspace, slug
     await db.query("update jobs set deleted_at = now() where slug = $1 and id <> $2 and deleted_at is null", [slug, doc.id]);
     await db.query(
       `
-        insert into jobs (id, slug, name, enabled, schedule, agent_slug, provider, content_hash)
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        insert into jobs (id, slug, name, enabled, schedule, agent_slug, prompt, provider, one_shot, content_hash)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         on conflict (id) do update set
           slug = excluded.slug, name = excluded.name, enabled = excluded.enabled,
-          schedule = excluded.schedule, agent_slug = excluded.agent_slug,
-          provider = excluded.provider, content_hash = excluded.content_hash,
-          updated_at = now(), deleted_at = null
+          schedule = excluded.schedule, agent_slug = excluded.agent_slug, prompt = excluded.prompt,
+          provider = excluded.provider, one_shot = excluded.one_shot,
+          content_hash = excluded.content_hash, updated_at = now(), deleted_at = null
       `,
-      [doc.id, slug, doc.name, doc.enabled, doc.schedule, doc.agent, doc.provider ?? null, hash]
+      [doc.id, slug, doc.name, doc.enabled, doc.schedule, doc.agent, doc.prompt, doc.provider ?? null, doc.oneShot ?? false, hash]
     );
   }
 }
@@ -225,7 +225,9 @@ export interface Job {
   enabled: boolean;
   schedule: string;
   agent: string;
+  prompt: string;
   provider: string | null;
+  oneShot: boolean;
 }
 
 export interface Conversation {
@@ -259,7 +261,9 @@ type JobRow = {
   enabled: boolean;
   schedule: string;
   agent_slug: string;
+  prompt: string;
   provider: string | null;
+  one_shot: boolean;
 };
 
 type ConversationRow = {
@@ -305,7 +309,9 @@ function toJob(row: JobRow): Job {
     enabled: row.enabled,
     schedule: row.schedule,
     agent: row.agent_slug,
+    prompt: row.prompt,
     provider: row.provider,
+    oneShot: row.one_shot,
   };
 }
 
@@ -491,3 +497,4 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
   };
 }
 export * from "./providers/local-cli.ts";
+export * from "./scheduler.ts";

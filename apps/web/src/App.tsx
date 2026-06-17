@@ -836,11 +836,20 @@ export function App() {
   async function saveAgentPersona() {
     if (!selectedAgentSlug) return;
     setAgentPersonaSaveState("saving");
-    await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/file`, {
+    setAgentRunError(null);
+    const response = await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/file`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ markdown: agentPersona, actor: "web" })
     });
+    if (!response.ok) {
+      // Keep the user's edits + dirty state; surface the error rather than
+      // reloading (which would clobber the unsaved persona).
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      setAgentRunError(body.error ?? `Save failed (${response.status})`);
+      setAgentPersonaSaveState("dirty");
+      return;
+    }
     setAgentPersonaSaveState("saved");
     await loadTeam();
   }
@@ -1191,7 +1200,7 @@ export function App() {
     const data = (await response.json()) as { page: Page };
     setPages((current) => orderPages([data.page, ...current]));
     setSelectedId(data.page.id);
-    setMemoryViewOpen(false);
+    backToData(); // land in DATA so the new page is visible in the editor/tree
   }
 
   async function createProject() {
@@ -1211,7 +1220,7 @@ export function App() {
     setPages((current) => mergePages(current, data.pages));
     if (startPage) {
       setSelectedId(startPage.id);
-      setMemoryViewOpen(false);
+      backToData(); // land in DATA so the new project page is visible
     }
     setProjectName("");
     setProjectFormOpen(false);
@@ -1346,7 +1355,7 @@ export function App() {
     const data = (await response.json()) as { page: Page };
     setPages((current) => orderPages([data.page, ...current]));
     setSelectedId(data.page.id);
-    setMemoryViewOpen(false);
+    backToData(); // land in DATA so the new page is visible in the editor/tree
   }
 
   async function movePage(page: Page, parentPage: Page | null) {

@@ -150,6 +150,16 @@ type AgentSummary = {
   tags: string[];
 };
 
+type JobSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  enabled: boolean;
+  schedule: string;
+  agent: string;
+  provider: string | null;
+};
+
 type ConversationSummary = {
   id: string;
   agent: string;
@@ -466,6 +476,10 @@ export function App() {
   const [teamAgents, setTeamAgents] = useState<AgentSummary[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(null);
+  const [teamJobs, setTeamJobs] = useState<JobSummary[]>([]);
+  const [agentPersona, setAgentPersona] = useState("");
+  const [agentPersonaSaveState, setAgentPersonaSaveState] = useState<"saved" | "dirty" | "saving">("saved");
+  const [agentRuns, setAgentRuns] = useState<ConversationSummary[]>([]);
   const [agentPrompt, setAgentPrompt] = useState("");
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentRunError, setAgentRunError] = useState<string | null>(null);
@@ -735,14 +749,45 @@ export function App() {
   }
 
   async function loadTeam() {
-    const [agentsRes, providersRes] = await Promise.all([fetch("/api/agents"), fetch("/api/providers")]);
+    const [agentsRes, providersRes, jobsRes] = await Promise.all([
+      fetch("/api/agents"),
+      fetch("/api/providers"),
+      fetch("/api/jobs")
+    ]);
     const agentsData = (await agentsRes.json()) as { agents: AgentSummary[] };
     const providersData = (await providersRes.json()) as { providers: ProviderStatus[] };
+    const jobsData = (await jobsRes.json()) as { jobs: JobSummary[] };
     setTeamAgents(agentsData.agents);
     setProviders(providersData.providers);
-    setSelectedAgentSlug((current) =>
-      current && agentsData.agents.some((a) => a.slug === current) ? current : agentsData.agents[0]?.slug ?? null
-    );
+    setTeamJobs(jobsData.jobs);
+    const next =
+      selectedAgentSlug && agentsData.agents.some((a) => a.slug === selectedAgentSlug)
+        ? selectedAgentSlug
+        : agentsData.agents[0]?.slug ?? null;
+    if (next) await selectAgent(next);
+    else setSelectedAgentSlug(null);
+  }
+
+  async function selectAgent(slug: string) {
+    setSelectedAgentSlug(slug);
+    setAgentRunError(null);
+    const fileRes = await fetch(`/api/agents/${encodeURIComponent(slug)}/file`);
+    setAgentPersona(fileRes.ok ? ((await fileRes.json()) as { markdown: string }).markdown : "");
+    setAgentPersonaSaveState("saved");
+    const runsRes = await fetch(`/api/conversations?agent=${encodeURIComponent(slug)}&limit=20`);
+    setAgentRuns(runsRes.ok ? ((await runsRes.json()) as { conversations: ConversationSummary[] }).conversations : []);
+  }
+
+  async function saveAgentPersona() {
+    if (!selectedAgentSlug) return;
+    setAgentPersonaSaveState("saving");
+    await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/file`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown: agentPersona, actor: "web" })
+    });
+    setAgentPersonaSaveState("saved");
+    await loadTeam();
   }
 
   async function openTeamView() {
@@ -1568,7 +1613,7 @@ export function App() {
                         className={agent.slug === selectedAgentSlug ? "memoryItem active" : "memoryItem"}
                         key={agent.id}
                         type="button"
-                        onClick={() => setSelectedAgentSlug(agent.slug)}
+                        onClick={() => selectAgent(agent.slug)}
                       >
                         <span>{agent.name}</span>
                         <small>
@@ -1582,29 +1627,6 @@ export function App() {
                     <p>No agents yet. Add an agents/&lt;slug&gt;.md persona file.</p>
                   )}
                 </div>
-                {selectedAgentSlug && (
-                  <div className="memoryDetail">
-                    <div className="memoryDetailHeader">
-                      <div>
-                        <strong>{selectedAgentSlug}</strong>
-                        <small>run a prompt against this agent</small>
-                      </div>
-                    </div>
-                    <textarea
-                      className="entityEditor"
-                      value={agentPrompt}
-                      rows={6}
-                      placeholder="Prompt for the agent…"
-                      onChange={(event) => setAgentPrompt(event.target.value)}
-                    />
-                    <button type="button" onClick={runSelectedAgent} disabled={agentRunning || !agentPrompt.trim()}>
-                      {agentRunning ? "Running…" : "Run agent"}
-                    </button>
-                    {agentRunError && <p className="runError">{agentRunError}</p>}
-                  </div>
-                )}
-              </aside>
-              <aside className="memoryPanel">
                 <div className="panelHeader">
                   <h2>Providers</h2>
                 </div>
@@ -1619,6 +1641,75 @@ export function App() {
                   ))}
                 </div>
               </aside>
+              {selectedAgentSlug && (
+                <aside className="memoryPanel">
+                  <div className="memoryDetail">
+                    <div className="memoryDetailHeader">
+                      <div>
+                        <strong>{selectedAgentSlug}</strong>
+                        <small>persona · jobs · run history</small>
+                      </div>
+                    </div>
+
+                    <h3>Persona</h3>
+                    <textarea
+                      className="entityEditor"
+                      value={agentPersona}
+                      rows={8}
+                      placeholder="System prompt (persona) for this agent…"
+                      onChange={(event) => {
+                        setAgentPersona(event.target.value);
+                        setAgentPersonaSaveState("dirty");
+                      }}
+                    />
+                    <button type="button" onClick={saveAgentPersona} disabled={agentPersonaSaveState !== "dirty"}>
+                      {agentPersonaSaveState === "saving" ? "Saving…" : "Save persona"}
+                    </button>
+
+                    <h3>Run a prompt</h3>
+                    <textarea
+                      className="entityEditor"
+                      value={agentPrompt}
+                      rows={4}
+                      placeholder="Prompt for the agent…"
+                      onChange={(event) => setAgentPrompt(event.target.value)}
+                    />
+                    <button type="button" onClick={runSelectedAgent} disabled={agentRunning || !agentPrompt.trim()}>
+                      {agentRunning ? "Running…" : "Run agent"}
+                    </button>
+                    {agentRunError && <p className="runError">{agentRunError}</p>}
+
+                    <h3>Jobs</h3>
+                    {teamJobs.filter((j) => j.agent === selectedAgentSlug).length ? (
+                      teamJobs
+                        .filter((j) => j.agent === selectedAgentSlug)
+                        .map((job) => (
+                          <div className="sourceItem" key={job.id}>
+                            <span>{job.name}</span>
+                            <small>
+                              {job.schedule}
+                              {job.enabled ? "" : " · disabled"}
+                            </small>
+                          </div>
+                        ))
+                    ) : (
+                      <p className="laneEmpty">No jobs target this agent.</p>
+                    )}
+
+                    <h3>Run history</h3>
+                    {agentRuns.length ? (
+                      agentRuns.map((run) => (
+                        <button className="memoryItem" key={run.id} type="button" onClick={() => { setTasksViewOpen(true); setTeamViewOpen(false); openConversation(run.id); }}>
+                          <span>{run.status}</span>
+                          <small>{run.startedAt ?? ""}</small>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="laneEmpty">No runs yet.</p>
+                    )}
+                  </div>
+                </aside>
+              )}
             </div>
           </div>
         ) : tasksViewOpen ? (

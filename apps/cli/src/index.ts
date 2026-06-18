@@ -63,6 +63,7 @@ const migrationTables = [
   "suggestions"
 ];
 // sessions are intentionally omitted — ephemeral; users re-authenticate after a migrate.
+// chunk_embeddings is intentionally omitted — derived; `reindex` recomputes it after a migrate.
 
 function parseFlags(args: string[]) {
   const flags: Flags = {};

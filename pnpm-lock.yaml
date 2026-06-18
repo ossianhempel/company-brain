@@ -249,6 +249,28 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/suggestions:
+    dependencies:
+      '@company-brain/db':
+        specifier: workspace:*
+        version: link:../db
+      '@company-brain/git-writer':
+        specifier: workspace:*
+        version: link:../git-writer
+      '@company-brain/pages':
+        specifier: workspace:*
+        version: link:../pages
+      '@company-brain/workspace':
+        specifier: workspace:*
+        version: link:../workspace
+    devDependencies:
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.3
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/workspace:
     dependencies:
       gray-matter:

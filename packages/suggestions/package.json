@@ -1,0 +1,23 @@
+{
+  "name": "@company-brain/suggestions",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test --test-concurrency=1 src/suggestion-file.test.ts src/index.test.ts"
+  },
+  "dependencies": {
+    "@company-brain/db": "workspace:*",
+    "@company-brain/git-writer": "workspace:*",
+    "@company-brain/pages": "workspace:*",
+    "@company-brain/workspace": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

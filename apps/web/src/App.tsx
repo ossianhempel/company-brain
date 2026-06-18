@@ -831,6 +831,10 @@ export function App() {
 
   async function refreshPages() {
     const response = await fetch("/api/pages");
+    // When auth is enabled and there's no session yet, this 401s before the auth
+    // check resolves. Bail instead of casting the error body to {pages} (which would
+    // set pages to undefined and crash); the login gate renders, and doLogin re-runs this.
+    if (!response.ok) return;
     const data = (await response.json()) as { pages: Page[] };
     setPages(data.pages);
     const homePage = data.pages.find((page) => page.slug === "home");

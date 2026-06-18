@@ -162,3 +162,19 @@ test("approving a suggestion whose target was deleted returns null and leaves it
     assert.equal(open.some((s) => s.id === sug!.id), true); // stays open
   });
 });
+
+test("approve bails when the suggestion was rejected first (no clobber of the reject)", async () => {
+  await withStores(async ({ pages, suggestions }) => {
+    const page = await pages.create({ title: "Race2", html: "<h1>Race2</h1><p>original</p>", actor: "owner" });
+    const sug = await suggestions.create({ targetPageId: page.id, proposedMarkdown: "# Race2\n\nfrom-suggestion\n", title: "S", author: "ada" });
+    // a reject commits first
+    const rejected = await suggestions.reject(sug!.id, "boss");
+    assert.equal(rejected?.status, "rejected");
+    // a now-stale approve must NOT apply the page or overwrite the rejection
+    const result = await suggestions.approve(sug!.id, "other");
+    assert.equal(result?.status, "rejected");
+    const after = await pages.get(page.id);
+    assert.match(after!.plainText, /original/);
+    assert.doesNotMatch(after!.plainText, /from-suggestion/);
+  });
+});

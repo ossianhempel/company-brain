@@ -669,12 +669,14 @@ async function main() {
 
     // Participate in per-file optimistic concurrency by default: send the version
     // we just fetched so a concurrent edit returns 409. --force opts out (last-write-
-    // wins) for automation that intends to overwrite.
+    // wins). Omit baseVersion when null — in --direct mode getPage resolves via the
+    // DB-only store (version always null), and null means "must have no prior commit",
+    // which would conflict on every committed page.
     const body = {
       title: flagString(flags, "title"),
       html: await htmlFromFlags(flags),
       actor: flagString(flags, "actor") ?? "cli",
-      ...(flags.force ? {} : { baseVersion: current.version ?? null })
+      ...(flags.force || current.version == null ? {} : { baseVersion: current.version })
     };
     const page = useApi
       ? (await requestApi<{ page: Page }>(`/api/pages/${current.id}`, {
@@ -1016,7 +1018,11 @@ async function handleAgentsCommand(subcommand: string | undefined, rest: string[
     if (flags.direct && (await canUseApi())) {
       throw new Error("Refusing --direct run: the server is running and owns the workspace. Omit --direct, or stop the server first.");
     }
-    const runToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+    // The legacy run-token header is only for the auth-off mode. When auth is on
+    // (COMPANY_BRAIN_API_TOKEN set), requestApi already sends the user's admin bearer
+    // and RBAC gates the route — injecting the run token here would overwrite that
+    // bearer (init.headers wins) and the auth middleware would reject the request.
+    const runToken = process.env.COMPANY_BRAIN_API_TOKEN ? undefined : process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
     const conversation = useApi
       ? (
           await requestApi<{ conversation: unknown }>(`/api/agents/${encodeURIComponent(slug)}/run`, {

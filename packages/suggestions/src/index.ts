@@ -214,11 +214,20 @@ export async function createSuggestionStore(db: CompanyBrainDb, opts: Suggestion
      * clobbering changes made since the proposal.
      */
     async approve(id: string, approver: string): Promise<Suggestion | null> {
-      const doc = await loadDoc(id);
+      let doc = await loadDoc(id);
       if (!doc) return null;
       if (doc.status !== "open") {
         const current = await db.query<SuggestionRow>("select * from suggestions where id = $1 and deleted_at is null", [id]);
         return current.rows[0] ? toSuggestion(current.rows[0]) : null; // idempotent: already decided
+      }
+      // Re-read the canonical status immediately before applying. All writes are
+      // serialized through the single writer, so a concurrent reject that already
+      // committed is reflected in the file here — bail rather than apply (and then
+      // overwrite) the rejection.
+      doc = await loadDoc(id);
+      if (!doc || doc.status !== "open") {
+        const current = await db.query<SuggestionRow>("select * from suggestions where id = $1 and deleted_at is null", [id]);
+        return current.rows[0] ? toSuggestion(current.rows[0]) : null;
       }
       const html = workspace.markdownToHtml(doc.proposedMarkdown);
       // Apply via the page store's writer; baseVersion = the proposal's base oid.

@@ -237,10 +237,21 @@ app.post("/api/admin/reindex", async (c) => {
 // --- Suggest-changes --------------------------------------------------------
 
 app.post("/api/pages/:id/suggestions", async (c) => {
-  const body = z.object({ proposedMarkdown: z.string().min(1), title: z.string().min(1), actor: z.string().min(1).optional() }).parse(await c.req.json());
+  // Accept either markdown (CLI/MCP) or HTML (the web editor produces HTML, which we
+  // convert to the canonical markdown the proposal stores).
+  const body = z
+    .object({
+      proposedMarkdown: z.string().min(1).optional(),
+      proposedHtml: z.string().min(1).optional(),
+      title: z.string().min(1),
+      actor: z.string().min(1).optional(),
+    })
+    .parse(await c.req.json());
+  const proposedMarkdown = body.proposedMarkdown ?? (body.proposedHtml ? workspace.htmlToMarkdown(body.proposedHtml) : undefined);
+  if (!proposedMarkdown) return c.json({ error: "proposedMarkdown or proposedHtml is required" }, 400);
   const suggestion = await suggestions.create({
     targetPageId: c.req.param("id"),
-    proposedMarkdown: body.proposedMarkdown,
+    proposedMarkdown,
     title: body.title,
     author: committer(c, body.actor),
   });

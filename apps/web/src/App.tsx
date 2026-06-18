@@ -522,6 +522,12 @@ export function App() {
   const [permissionNote, setPermissionNote] = useState("");
   const [saveState, setSaveState] = useState<"saved" | "dirty" | "saving" | "error">("saved");
   const [draggingPageId, setDraggingPageId] = useState<string | null>(null);
+  const [authUser, setAuthUser] = useState<{ name: string; role: string } | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginToken, setLoginToken] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [suggestState, setSuggestState] = useState<"idle" | "saving" | "sent" | "error">("idle");
   const [dragTarget, setDragTarget] = useState<DragTarget | null>(null);
   const titleRef = useRef(title);
   const htmlRef = useRef(html);
@@ -643,6 +649,57 @@ export function App() {
   useEffect(() => {
     void refreshPages();
   }, []);
+
+  // Resolve identity on load. When auth is off the server returns the synthetic
+  // local-user admin (so no login screen appears); when on + unauthenticated it
+  // returns 401 and we render the login gate.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) {
+          const { user } = (await res.json()) as { user: { name: string; role: string } };
+          setAuthUser(user);
+        } else {
+          setAuthUser(null);
+        }
+      } catch {
+        setAuthUser(null);
+      } finally {
+        setAuthChecked(true);
+      }
+    })();
+  }, []);
+
+  async function doLogin() {
+    setLoginError(null);
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: loginEmail, token: loginToken }),
+    });
+    if (!res.ok) {
+      setLoginError("Invalid email or token.");
+      return;
+    }
+    const { user } = (await res.json()) as { user: { name: string; role: string } };
+    setAuthUser(user);
+    setLoginToken("");
+    await refreshPages();
+  }
+
+  async function suggestEdit() {
+    if (!selectedId) return;
+    const proposalTitle = window.prompt("Title for your suggested edit:", title ? `Suggestion: ${title}` : "Suggested edit");
+    if (!proposalTitle) return;
+    setSuggestState("saving");
+    const res = await fetch(`/api/pages/${selectedId}/suggestions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proposedHtml: html, title: proposalTitle, actor: "web" }),
+    });
+    setSuggestState(res.ok ? "sent" : "error");
+  }
 
   useEffect(() => {
     if (!openMenuPageId) {
@@ -1445,6 +1502,35 @@ export function App() {
     await loadPageVersions(data.page.id);
   }
 
+  if (authChecked && !authUser) {
+    return (
+      <main className="loginShell">
+        <form
+          className="loginCard"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void doLogin();
+          }}
+        >
+          <strong>Company Brain</strong>
+          <p>Sign in to continue.</p>
+          <label>
+            Email
+            <input type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} autoFocus />
+          </label>
+          <label>
+            Token
+            <input type="password" value={loginToken} onChange={(e) => setLoginToken(e.target.value)} />
+          </label>
+          {loginError && <p className="runError">{loginError}</p>}
+          <button type="submit" disabled={!loginEmail || !loginToken}>
+            Sign in
+          </button>
+        </form>
+      </main>
+    );
+  }
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -2157,6 +2243,23 @@ export function App() {
           <button className="iconButton" type="button" onClick={savePage} aria-label="Save page" title="Save page">
             <Icon name="save" size={15} />
           </button>
+          {selectedPage && (
+            <button
+              className="iconButton"
+              type="button"
+              onClick={suggestEdit}
+              aria-label="Suggest edit"
+              title={
+                suggestState === "sent"
+                  ? "Suggestion sent for review"
+                  : suggestState === "error"
+                    ? "Couldn't send suggestion"
+                    : "Suggest this edit (propose without direct write)"
+              }
+            >
+              <Icon name="spark" size={15} />
+            </button>
+          )}
           {selectedPage && (
             <button
               className={historyOpen ? "iconButton active" : "iconButton"}

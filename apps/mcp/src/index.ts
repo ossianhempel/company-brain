@@ -84,12 +84,16 @@ const server = new McpServer({
 });
 
 async function requestApi<T>(path: string, init?: RequestInit) {
+  // Authenticate with a bearer token when the server has auth enabled
+  // (COMPANY_BRAIN_API_TOKEN); unset in the default install → no header.
+  const apiToken = process.env.COMPANY_BRAIN_API_TOKEN;
   let response: Response;
   try {
     response = await fetch(`${apiUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
+        ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
         ...init?.headers
       }
     });

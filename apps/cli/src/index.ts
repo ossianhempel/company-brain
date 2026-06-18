@@ -289,10 +289,14 @@ async function resolvePage(ref: string) {
 }
 
 async function requestApi<T>(path: string, init?: RequestInit) {
+  // When the server has auth enabled, the CLI authenticates with a bearer token
+  // (COMPANY_BRAIN_API_TOKEN). Unset in the default single-user install → no header.
+  const apiToken = process.env.COMPANY_BRAIN_API_TOKEN;
   const response = await fetch(`${defaultApiUrl}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
       ...init?.headers
     }
   });

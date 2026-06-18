@@ -135,27 +135,30 @@ await setupPgVector(db, { isPostgres: Boolean(process.env.COMPANY_BRAIN_DATABASE
 // so the network embed call never blocks the serialized writer; content-hash skip makes
 // it idempotent. (Source artifacts are DB-only; they embed on the next content commit or
 // an admin reindex.)
+let embedRunning = false;
+let embedQueued = false;
+function refreshEmbeddings(): void {
+  if (!embeddingConfig) return; // no-op when no embedding provider is configured
+  if (embedRunning) {
+    embedQueued = true;
+    return;
+  }
+  embedRunning = true;
+  setImmediate(() => {
+    void reindexEmbeddings(db, embeddings)
+      .catch((err) => console.error("[embeddings] refresh failed:", err instanceof Error ? err.message : err))
+      .finally(() => {
+        embedRunning = false;
+        if (embedQueued) {
+          embedQueued = false;
+          refreshEmbeddings();
+        }
+      });
+  });
+}
+// Pages/memory commit through git → refresh on the commit hook. Source artifacts are
+// DB-only (no commit) → routes that ingest them call refreshEmbeddings() directly.
 if (embeddingConfig) {
-  let embedRunning = false;
-  let embedQueued = false;
-  const refreshEmbeddings = (): void => {
-    if (embedRunning) {
-      embedQueued = true;
-      return;
-    }
-    embedRunning = true;
-    setImmediate(() => {
-      void reindexEmbeddings(db, embeddings)
-        .catch((err) => console.error("[embeddings] refresh failed:", err instanceof Error ? err.message : err))
-        .finally(() => {
-          embedRunning = false;
-          if (embedQueued) {
-            embedQueued = false;
-            refreshEmbeddings();
-          }
-        });
-    });
-  };
   gitWriter.addCommitHook(({ paths }) => {
     if (paths.some((p) => workspace.pathArea(p) === "pages" || workspace.pathArea(p) === "memory")) refreshEmbeddings();
   });
@@ -583,6 +586,7 @@ app.get("/api/recall", async (c) => {
 app.post("/api/source-artifacts", async (c) => {
   const body = artifactInput.parse(await c.req.json());
   const artifact = await memory.ingestArtifact({ ...body, actor: committer(c, body.actor) });
+  refreshEmbeddings(); // DB-only ingest (no git commit) → refresh embeddings explicitly
   return c.json({ artifact }, 201);
 });
 

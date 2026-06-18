@@ -634,6 +634,15 @@ async function migrateDb(db: CompanyBrainDb) {
     create index if not exists chunk_embeddings_owner_idx on chunk_embeddings (chunk_type, owner_id);
   `);
 
+  // Phase 6: drop the self-referential superseded_by FK. The link is derived/rebuildable
+  // from the entity-file `sup:` marker, so a hard FK adds only ordering fragility — it
+  // breaks any unordered row-at-a-time insert (the `migrate to postgres` copy, where a
+  // superseded row can be inserted before its replacement). The column stays; integrity
+  // is maintained by reindex from files, not the constraint.
+  await applyMigration(db, 16, `
+    alter table memories drop constraint if exists memories_superseded_by_memory_id_fkey;
+  `);
+
 }
 
 async function applyMigration(db: CompanyBrainDb, version: number, sql: string) {

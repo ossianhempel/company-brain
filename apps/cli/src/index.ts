@@ -7,6 +7,10 @@ import { createGitWriter } from "@company-brain/git-writer";
 import {
   createMemoryStore,
   reindexAllEntities,
+  createEmbeddingRegistry,
+  createApiEmbeddingProvider,
+  apiEmbeddingConfigFromEnv,
+  reindexEmbeddings,
   type MemoryKind,
   type MemorySource,
   type RecallResponse,
@@ -509,8 +513,13 @@ async function main() {
     await reindexAllPages(db, workspace);
     await reindexAllEntities(db, workspace);
     await reindexAllAgentAreas(db, workspace);
+    // Rebuild derived embeddings too, when an embedding provider is configured (else no-op).
+    const embeddings = createEmbeddingRegistry();
+    const embeddingConfig = apiEmbeddingConfigFromEnv();
+    if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingConfig));
+    const embedded = await reindexEmbeddings(db, embeddings);
     await db.close();
-    printJson({ ok: true, mode: "direct" });
+    printJson({ ok: true, mode: "direct", embedded: embedded?.embedded ?? 0 });
     return;
   }
 

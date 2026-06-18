@@ -7,6 +7,14 @@ import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writ
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
+import {
+  createAgentStore,
+  createProviderRegistry,
+  createScheduler,
+  reindexAllAgentAreas,
+  claudeLocalProvider,
+  codexLocalProvider,
+} from "@company-brain/agents";
 
 const pageInput = z.object({
   title: z.string().min(1),
@@ -99,7 +107,41 @@ const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
 const memory = await createMemoryStore(db, { gitWriter, workspace });
 
-app.use("*", cors());
+// Agent runtime: provider registry (local-CLI providers), the agent store, and
+// the in-process scheduler. The scheduler can run installed agent CLIs on a
+// schedule, so it is opt-out via COMPANY_BRAIN_DISABLE_SCHEDULER for operators
+// who don't want host execution.
+const providers = createProviderRegistry();
+providers.register(claudeLocalProvider());
+providers.register(codexLocalProvider());
+const agents = await createAgentStore(db, { gitWriter, workspace, providers });
+const scheduler = createScheduler({
+  store: agents,
+  runAgent: (input) => agents.runAgent(input),
+  workspaceDir,
+  reindex: () => reindexAllAgentAreas(db, workspace),
+});
+// The scheduler runs jobs/heartbeats via local agent CLIs (host execution) and
+// would execute personas/jobs derived from files that any writer can change
+// (the API is unauthenticated until Phase 5). So it is OFF BY DEFAULT — operators
+// opt in with COMPANY_BRAIN_ENABLE_SCHEDULER=1. With this and the off-by-default
+// run API, no automatic host execution happens unless the operator enables it.
+if (process.env.COMPANY_BRAIN_ENABLE_SCHEDULER === "1") {
+  await scheduler.start();
+}
+
+// CORS is closed to cross-origin by default. The agent runtime can spawn local
+// agent CLIs (host execution); a wide-open policy would let any web page the
+// operator visits drive the API cross-origin (e.g. trigger agent runs). The
+// same-origin web app and non-browser CLI/MCP clients are unaffected; operators
+// expose specific origins via COMPANY_BRAIN_ALLOWED_ORIGINS (comma-separated).
+// NOTE: this is hardening, not authentication — authn/RBAC is Phase 5, and the
+// server must not be exposed to untrusted networks until then.
+const allowedOrigins = (process.env.COMPANY_BRAIN_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use("*", cors({ origin: (origin) => (allowedOrigins.includes(origin) ? origin : null) }));
 
 // Optimistic-concurrency conflicts from the git writer map to HTTP 409.
 app.onError((err, c) => {
@@ -118,7 +160,104 @@ app.get("/health", (c) => {
 app.post("/api/admin/reindex", async (c) => {
   await reindexAllPages(db, workspace);
   await reindexAllEntities(db, workspace);
+  await reindexAllAgentAreas(db, workspace);
   return c.json({ ok: true });
+});
+
+// --- Agent runtime: agents, jobs, conversations, providers ------------------
+
+app.get("/api/agents", async (c) => {
+  return c.json({ agents: await agents.listAgents() });
+});
+
+app.get("/api/agents/:slug", async (c) => {
+  const agent = await agents.getAgent(c.req.param("slug"));
+  if (!agent) return c.json({ error: "Agent not found" }, 404);
+  return c.json({ agent });
+});
+
+app.get("/api/agents/:slug/file", async (c) => {
+  const file = await agents.getAgentFile(c.req.param("slug"));
+  if (!file) return c.json({ error: "Agent file not found" }, 404);
+  return c.json(file);
+});
+
+// Editing a persona is an ordinary content write (like a page) — it does not by
+// itself execute anything. Host execution only happens via the opt-in scheduler
+// or the opt-in run API. Authn/RBAC for all writes is Phase 5.
+app.put("/api/agents/:slug/file", async (c) => {
+  const body = z.object({ markdown: z.string(), actor: z.string().min(1).optional() }).parse(await c.req.json());
+  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor);
+  return c.json({ agent });
+});
+
+// HTTP-triggered runs spawn the agent's configured provider (local CLI = host
+// execution), so this route is OFF BY DEFAULT. Operators opt in with
+// COMPANY_BRAIN_ENABLE_AGENT_RUN_API=1, and may additionally require a bearer
+// token via COMPANY_BRAIN_AGENT_RUN_TOKEN. Scheduled (in-process) runs are
+// unaffected. This is access control, not full auth — authn/RBAC is Phase 5,
+// and the server must stay off untrusted networks until then.
+const agentRunApiEnabled = process.env.COMPANY_BRAIN_ENABLE_AGENT_RUN_API === "1";
+const agentRunToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+
+app.post("/api/agents/:slug/run", async (c) => {
+  if (!agentRunApiEnabled) {
+    return c.json(
+      { error: "Agent run API is disabled. Set COMPANY_BRAIN_ENABLE_AGENT_RUN_API=1 to enable HTTP-triggered runs." },
+      403
+    );
+  }
+  if (agentRunToken && c.req.header("authorization") !== `Bearer ${agentRunToken}`) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  const body = z
+    .object({ prompt: z.string().min(1), provider: z.string().optional(), actor: z.string().min(1).optional() })
+    .parse(await c.req.json());
+  try {
+    const conversation = await agents.runAgent({
+      agentSlug: c.req.param("slug"),
+      prompt: body.prompt,
+      providerOverride: body.provider,
+      actor: body.actor,
+    });
+    return c.json({ conversation });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "run failed" }, 404);
+  }
+});
+
+app.get("/api/jobs", async (c) => {
+  return c.json({ jobs: await agents.listJobs() });
+});
+
+app.get("/api/jobs/:slug", async (c) => {
+  const job = await agents.getJob(c.req.param("slug"));
+  if (!job) return c.json({ error: "Job not found" }, 404);
+  return c.json({ job });
+});
+
+const conversationStatus = z.enum(["running", "awaiting_input", "done", "failed", "archived"]);
+
+app.get("/api/conversations", async (c) => {
+  const statusParam = c.req.query("status");
+  const parsedStatus = conversationStatus.safeParse(statusParam);
+  const limitRaw = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
+  const conversations = await agents.listConversations({
+    status: parsedStatus.success ? parsedStatus.data : undefined,
+    agent: c.req.query("agent") || undefined,
+    limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
+  });
+  return c.json({ conversations });
+});
+
+app.get("/api/conversations/:id", async (c) => {
+  const conversation = await agents.getConversation(c.req.param("id"));
+  if (!conversation) return c.json({ error: "Conversation not found" }, 404);
+  return c.json({ conversation });
+});
+
+app.get("/api/providers", async (c) => {
+  return c.json({ providers: await providers.detectAll() });
 });
 
 app.get("/api/pages", async (c) => {

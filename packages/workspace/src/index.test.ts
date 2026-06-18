@@ -196,3 +196,67 @@ test("rejects path-traversal slugs at the path-construction chokepoint", async (
     assert.equal(ws.entityFilePath("team/eng"), "memory/team/eng.md");
   });
 });
+
+// --- Phase 3 U1: agents/jobs/conversations areas + raw helpers --------------
+
+test("agent file round-trips through the agents area", async () => {
+  await withWorkspace(async (ws) => {
+    await ws.writeAgent("scribe", { frontmatter: { title: "Scribe", id: "ag1" }, markdown: "You are the scribe.\n" }, NOW);
+    const got = await ws.readAgent("scribe");
+    assert.equal(got?.frontmatter.id, "ag1");
+    assert.match(got?.markdown ?? "", /You are the scribe\./);
+    assert.deepEqual(await ws.listAgentSlugs(), ["scribe"]);
+    assert.equal(ws.agentFilePath("scribe"), "agents/scribe.md");
+  });
+});
+
+test("job YAML round-trips raw (no frontmatter stamping)", async () => {
+  await withWorkspace(async (ws) => {
+    const yaml = "name: nightly\nenabled: true\nschedule: \"0 2 * * *\"\nagent: scribe\nprompt: Summarize.\n";
+    await ws.writeJob("nightly", yaml);
+    assert.equal(await ws.readJob("nightly"), yaml); // exact bytes, no id/created stamping
+    assert.deepEqual(await ws.listJobSlugs(), ["nightly"]);
+    assert.equal(ws.jobFilePath("nightly"), "jobs/nightly.yaml");
+  });
+});
+
+test("areas are isolated and slugFromPath/pathArea handle each extension", async () => {
+  await withWorkspace(async (ws) => {
+    await ws.writeAgent("a", { frontmatter: { title: "A" }, markdown: "x\n" }, NOW);
+    await ws.writeJob("j", "name: j\n");
+    await ws.writeConversation("c1", { frontmatter: { title: "C" }, markdown: "y\n" }, NOW);
+    assert.deepEqual(await ws.listAgentSlugs(), ["a"]);
+    assert.deepEqual(await ws.listJobSlugs(), ["j"]);
+    assert.deepEqual(await ws.listConversationSlugs(), ["c1"]);
+    assert.equal(ws.pathArea("jobs/j.yaml"), "jobs");
+    assert.equal(ws.slugFromPath("jobs/j.yaml"), "j");
+    assert.equal(ws.slugFromPath("agents/a.md"), "a");
+    assert.equal(ws.slugFromPath("conversations/c1.md"), "c1");
+  });
+});
+
+test("new-area writers reject path-traversal slugs", async () => {
+  await withWorkspace(async (ws) => {
+    await assert.rejects(() => ws.writeAgent("../evil", { frontmatter: { title: "x" }, markdown: "x\n" }, NOW));
+    await assert.rejects(() => ws.writeJob("../../evil", "x: 1\n"));
+    assert.throws(() => ws.jobFilePath("../escape"));
+  });
+});
+
+test("raw helpers reject unsafe area / extension (not just slug)", async () => {
+  await withWorkspace(async (ws) => {
+    await assert.rejects(() => ws.writeRawIn("..", "outside", "txt", "x"));
+    await assert.rejects(() => ws.writeRawIn("jobs", "ok", "../../evil", "x"));
+    assert.throws(() => ws.jobFilePath("../escape")); // slug still guarded
+    // a legit raw write still works
+    await ws.writeRawIn("jobs", "ok", "yaml", "name: ok\n");
+    assert.equal(await ws.readRawIn("jobs", "ok", "yaml"), "name: ok\n");
+  });
+});
+
+test("listRawIn rejects an unsafe area/extension", async () => {
+  await withWorkspace(async (ws) => {
+    await assert.rejects(() => ws.listRawIn("..", "yaml"));
+    await assert.rejects(() => ws.listRawIn("jobs", "../x"));
+  });
+});

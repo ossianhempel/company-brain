@@ -63,6 +63,12 @@ export interface StoredPage {
 const PAGES_DIR = "pages";
 /** Subdirectory under the workspace where entity/memory files live. */
 const MEMORY_DIR = "memory";
+/** Subdirectory for agent persona files (markdown). */
+const AGENTS_DIR = "agents";
+/** Subdirectory for scheduled job definitions (YAML). */
+const JOBS_DIR = "jobs";
+/** Subdirectory for conversation transcripts (markdown, written once). */
+const CONVERSATIONS_DIR = "conversations";
 
 // Sanitize allowlist mirrors packages/pages `prepareHtml` so the HTML boundary
 // is identical whether content arrives from the editor or is re-derived from a
@@ -143,7 +149,7 @@ export function createWorkspace(options: WorkspaceOptions) {
   function slugFromPath(relPath: string): string {
     const norm = relPath.replace(/\\/g, "/");
     const withoutArea = norm.slice(norm.indexOf("/") + 1); // strip leading "<area>/"
-    return withoutArea.replace(/\/index\.md$/, "").replace(/\.md$/, "");
+    return withoutArea.replace(/\/index\.md$/, "").replace(/\.(md|ya?ml)$/, "");
   }
 
   /** Repo-relative file path for a page slug (slug may be nested, e.g. a/b/c). */
@@ -303,6 +309,111 @@ export function createWorkspace(options: WorkspaceOptions) {
   const listPageSlugs = () => listSlugsIn(PAGES_DIR);
   const listEntitySlugs = () => listSlugsIn(MEMORY_DIR);
 
+  // --- Raw (non-markdown) file IO -----------------------------------------
+  // Jobs are YAML; transcripts may carry non-frontmatter content. These reuse
+  // the path-safety + git-staging contract but skip frontmatter stamping and
+  // the markdown `.md` assumption.
+
+  // area and ext are single path segments (no nesting/traversal) — validate them
+  // too, since the raw helpers are public and take them as arguments.
+  function assertSafeSegment(value: string, label: string): void {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+      throw new Error(`Unsafe workspace ${label}: ${JSON.stringify(value)}`);
+    }
+  }
+
+  function rawFilePath(area: string, slug: string, ext: string): string {
+    assertSafeSegment(area, "area");
+    assertSafeSegment(ext, "extension");
+    assertSafeSlug(slug);
+    return `${area}/${slug}.${ext}`;
+  }
+
+  async function readRawIn(area: string, slug: string, ext: string): Promise<string | null> {
+    const abs = join(root, rawFilePath(area, slug, ext));
+    if (!existsSync(abs)) return null;
+    return readFile(abs, "utf8");
+  }
+
+  async function writeRawIn(
+    area: string,
+    slug: string,
+    ext: string,
+    content: string,
+    options: { exclusive?: boolean } = {}
+  ): Promise<string> {
+    const relPath = rawFilePath(area, slug, ext);
+    const abs = join(root, relPath);
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, content, { encoding: "utf8", flag: options.exclusive ? "wx" : "w" });
+    return relPath;
+  }
+
+  async function deleteRawIn(area: string, slug: string, ext: string): Promise<string[]> {
+    const relPath = rawFilePath(area, slug, ext);
+    const abs = join(root, relPath);
+    if (existsSync(abs)) {
+      await rm(abs, { force: true });
+      return [relPath];
+    }
+    return [];
+  }
+
+  /** All slugs on disk within an area whose files carry the given extension. */
+  async function listRawIn(area: string, ext: string): Promise<string[]> {
+    assertSafeSegment(area, "area");
+    assertSafeSegment(ext, "extension");
+    const base = join(root, area);
+    if (!existsSync(base)) return [];
+    const suffix = `.${ext}`;
+    const slugs: string[] = [];
+    const walk = async (absDir: string): Promise<void> => {
+      for (const entry of await readdir(absDir, { withFileTypes: true })) {
+        const abs = join(absDir, entry.name);
+        if (entry.isDirectory()) {
+          await walk(abs);
+        } else if (entry.name.endsWith(suffix)) {
+          const rel = relative(base, abs).replace(/\\/g, "/");
+          slugs.push(rel.slice(0, -suffix.length));
+        }
+      }
+    };
+    await walk(base);
+    return slugs;
+  }
+
+  // Agent-area wrappers (markdown: frontmatter identity + body = system prompt).
+  const agentFilePath = (slug: string) => areaFilePath(AGENTS_DIR, slug);
+  const readAgent = (slug: string) => readFileIn(AGENTS_DIR, slug);
+  const writeAgent = (
+    slug: string,
+    input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
+    now: string,
+    options: { exclusive?: boolean } = {}
+  ) => writeFileIn(AGENTS_DIR, slug, input, now, options);
+  const deleteAgent = (slug: string) => deleteFileIn(AGENTS_DIR, slug);
+  const listAgentSlugs = () => listSlugsIn(AGENTS_DIR);
+
+  // Conversation-area wrappers (markdown transcripts, written once).
+  const conversationFilePath = (slug: string) => areaFilePath(CONVERSATIONS_DIR, slug);
+  const readConversation = (slug: string) => readFileIn(CONVERSATIONS_DIR, slug);
+  const writeConversation = (
+    slug: string,
+    input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
+    now: string,
+    options: { exclusive?: boolean } = {}
+  ) => writeFileIn(CONVERSATIONS_DIR, slug, input, now, options);
+  const deleteConversation = (slug: string) => deleteFileIn(CONVERSATIONS_DIR, slug);
+  const listConversationSlugs = () => listSlugsIn(CONVERSATIONS_DIR);
+
+  // Job-area wrappers (raw YAML).
+  const jobFilePath = (slug: string) => rawFilePath(JOBS_DIR, slug, "yaml");
+  const readJob = (slug: string) => readRawIn(JOBS_DIR, slug, "yaml");
+  const writeJob = (slug: string, content: string, options: { exclusive?: boolean } = {}) =>
+    writeRawIn(JOBS_DIR, slug, "yaml", content, options);
+  const deleteJob = (slug: string) => deleteRawIn(JOBS_DIR, slug, "yaml");
+  const listJobSlugs = () => listRawIn(JOBS_DIR, "yaml");
+
   return {
     pathArea,
     slugFromPath,
@@ -323,6 +434,29 @@ export function createWorkspace(options: WorkspaceOptions) {
     writeEntity,
     deleteEntity,
     listEntitySlugs,
+    // raw (non-markdown) IO
+    readRawIn,
+    writeRawIn,
+    deleteRawIn,
+    listRawIn,
+    // agents area
+    agentFilePath,
+    readAgent,
+    writeAgent,
+    deleteAgent,
+    listAgentSlugs,
+    // conversations area
+    conversationFilePath,
+    readConversation,
+    writeConversation,
+    deleteConversation,
+    listConversationSlugs,
+    // jobs area (raw YAML)
+    jobFilePath,
+    readJob,
+    writeJob,
+    deleteJob,
+    listJobSlugs,
   };
 }
 

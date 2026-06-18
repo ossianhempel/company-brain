@@ -498,6 +498,67 @@ async function migrateDb(db: CompanyBrainDb) {
     create index if not exists memories_entity_id_idx on memories (entity_id);
   `);
 
+  // Phase 3: agent runtime. Agents (persona files), jobs (scheduled run defs),
+  // and conversations (run transcripts) are workspace files; these are their
+  // derived index. Live-only unique slug index mirrors entities (migration 12).
+  await applyMigration(db, 13, `
+    create table if not exists agents (
+      id text primary key,
+      slug text not null default '',
+      name text not null,
+      provider text,
+      model text,
+      enabled boolean not null default true,
+      schedule text,
+      tags_json text not null default '[]',
+      content_hash text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+    create unique index if not exists agents_slug_live_idx on agents (slug) where deleted_at is null;
+    create index if not exists agents_deleted_at_idx on agents (deleted_at);
+
+    create table if not exists jobs (
+      id text primary key,
+      slug text not null default '',
+      name text not null,
+      enabled boolean not null default true,
+      schedule text not null default '',
+      agent_slug text not null default '',
+      prompt text not null default '',
+      provider text,
+      model text,
+      timeout_ms integer,
+      one_shot boolean not null default false,
+      content_hash text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+    create unique index if not exists jobs_slug_live_idx on jobs (slug) where deleted_at is null;
+    create index if not exists jobs_deleted_at_idx on jobs (deleted_at);
+
+    create table if not exists conversations (
+      id text primary key,
+      agent_slug text not null default '',
+      job_slug text,
+      status text not null default 'done',
+      provider text,
+      model text,
+      started_at timestamptz,
+      ended_at timestamptz,
+      usage_json text,
+      error text,
+      content_hash text,
+      created_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+    create index if not exists conversations_status_idx on conversations (status);
+    create index if not exists conversations_agent_slug_idx on conversations (agent_slug);
+    create index if not exists conversations_deleted_at_idx on conversations (deleted_at);
+  `);
+
 }
 
 async function applyMigration(db: CompanyBrainDb, version: number, sql: string) {

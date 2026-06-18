@@ -689,5 +689,119 @@ server.registerTool(
   }
 );
 
+// --- Agent runtime: agents, jobs, conversations, providers -----------------
+
+server.registerTool(
+  "company_brain_list_agents",
+  {
+    title: "List Agents",
+    description: "List the brain's agents (personas) — slug, name, provider/model, enabled state.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async () => {
+    return toolResult(await requestApi<{ agents: unknown[] }>("/api/agents"));
+  }
+);
+
+server.registerTool(
+  "company_brain_get_agent",
+  {
+    title: "Get Agent",
+    description: "Get an agent's metadata + its persona (system prompt) by slug.",
+    inputSchema: { slug: z.string().min(1).describe("Agent slug.") },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ slug }) => {
+    const agent = await requestApi<{ agent: unknown }>(`/api/agents/${encodeURIComponent(slug)}`);
+    const file = await requestApi<{ markdown: string }>(`/api/agents/${encodeURIComponent(slug)}/file`);
+    return toolResult({ ...agent, systemPrompt: file.markdown });
+  }
+);
+
+server.registerTool(
+  "company_brain_run_agent",
+  {
+    title: "Run Agent",
+    description:
+      "Run an agent with a prompt and record the conversation transcript. Resolves the agent's configured provider unless overridden.",
+    inputSchema: {
+      slug: z.string().min(1).describe("Agent slug to run."),
+      prompt: z.string().min(1).describe("The task prompt for the run."),
+      provider: z.string().optional().describe("Override the provider id (e.g. claude_local, codex_local).")
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+  },
+  async ({ slug, prompt, provider }) => {
+    const runToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+    return toolResult(
+      await requestApi<{ conversation: unknown }>(`/api/agents/${encodeURIComponent(slug)}/run`, {
+        method: "POST",
+        headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
+        body: JSON.stringify({ prompt, provider, actor: "mcp" })
+      })
+    );
+  }
+);
+
+server.registerTool(
+  "company_brain_list_jobs",
+  {
+    title: "List Jobs",
+    description: "List scheduled jobs (cron schedule, target agent, enabled state).",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async () => {
+    return toolResult(await requestApi<{ jobs: unknown[] }>("/api/jobs"));
+  }
+);
+
+server.registerTool(
+  "company_brain_list_conversations",
+  {
+    title: "List Conversations",
+    description: "List agent run transcripts, optionally filtered by status or agent slug.",
+    inputSchema: {
+      status: z.enum(["running", "awaiting_input", "done", "failed", "archived"]).optional().describe("Filter by status."),
+      agent: z.string().optional().describe("Filter by agent slug.")
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ status, agent }) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (agent) params.set("agent", agent);
+    const query = params.toString();
+    return toolResult(await requestApi<{ conversations: unknown[] }>(`/api/conversations${query ? `?${query}` : ""}`));
+  }
+);
+
+server.registerTool(
+  "company_brain_get_conversation",
+  {
+    title: "Get Conversation",
+    description: "Get a conversation transcript (metadata + turns) by id.",
+    inputSchema: { id: z.string().min(1).describe("Conversation id.") },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ id }) => {
+    return toolResult(await requestApi<{ conversation: unknown }>(`/api/conversations/${encodeURIComponent(id)}`));
+  }
+);
+
+server.registerTool(
+  "company_brain_list_providers",
+  {
+    title: "List Providers",
+    description: "List agent providers and their detection status (whether the local CLI is installed and runnable).",
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async () => {
+    return toolResult(await requestApi<{ providers: unknown[] }>("/api/providers"));
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

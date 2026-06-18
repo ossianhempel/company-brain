@@ -14,6 +14,7 @@
     "@company-brain/git-writer": "workspace:*",
     "@company-brain/memory": "workspace:*",
     "@company-brain/pages": "workspace:*",
+    "@company-brain/suggestions": "workspace:*",
     "@company-brain/workspace": "workspace:*",
     "@hono/node-server": "^1.14.4",
     "hono": "^4.7.11",

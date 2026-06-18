@@ -79,3 +79,74 @@ test("reindexSuggestions content_hash skip is a no-op when unchanged", async () 
     assert.equal(new Date(after.rows[0].updated_at).getTime(), new Date(before.rows[0].updated_at).getTime());
   });
 });
+
+// --- U6: suggest-changes store flow -----------------------------------------
+import { createPageStore } from "@company-brain/pages";
+import { createSuggestionStore } from "./index.ts";
+
+async function withStores<T>(
+  run: (s: {
+    db: Awaited<ReturnType<typeof createDb>>;
+    pages: Awaited<ReturnType<typeof createPageStore>>;
+    suggestions: Awaited<ReturnType<typeof createSuggestionStore>>;
+  }) => Promise<T>
+) {
+  const wsDir = await mkdtemp(join(tmpdir(), "cb-sugflow-ws-"));
+  const dbDir = await mkdtemp(join(tmpdir(), "cb-sugflow-db-"));
+  const db = await createDb(dbDir);
+  const workspace = createWorkspace({ workspaceDir: wsDir });
+  const gitWriter = createGitWriter({ workspaceDir: wsDir });
+  const pages = await createPageStore(db, { gitWriter, workspace });
+  gitWriter.addCommitHook(suggestionsCommitHook(db, workspace));
+  let n = 0;
+  const suggestions = await createSuggestionStore(db, { gitWriter, workspace, pages, newId: () => `sg-${++n}` });
+  try {
+    return await run({ db, pages, suggestions });
+  } finally {
+    await db.close();
+    await rm(wsDir, { recursive: true, force: true });
+    await rm(dbDir, { recursive: true, force: true });
+  }
+}
+
+test("create → open suggestion listed; approve applies the proposed body to the page", async () => {
+  await withStores(async ({ pages, suggestions }) => {
+    const page = await pages.create({ title: "Home", html: "<h1>Home</h1><p>old</p>", actor: "owner" });
+    const sug = await suggestions.create({ targetPageId: page.id, proposedMarkdown: "# Home\n\nshiny new body\n", title: "Refresh", author: "ada" });
+    assert.ok(sug);
+    const open = await suggestions.list({ status: "open" });
+    assert.equal(open.length, 1);
+
+    const approved = await suggestions.approve(sug!.id, "boss");
+    assert.equal(approved?.status, "approved");
+    // the target page now carries the proposed content (applied via the single writer)
+    const updated = await pages.get(page.id);
+    assert.match(updated!.plainText, /shiny new body/);
+    // and it left the open queue
+    assert.equal((await suggestions.list({ status: "open" })).length, 0);
+  });
+});
+
+test("reject leaves the target page unchanged", async () => {
+  await withStores(async ({ pages, suggestions }) => {
+    const page = await pages.create({ title: "Doc", html: "<h1>Doc</h1><p>keep me</p>", actor: "owner" });
+    const sug = await suggestions.create({ targetPageId: page.id, proposedMarkdown: "# Doc\n\nrejected body\n", title: "X", author: "ada" });
+    const rejected = await suggestions.reject(sug!.id, "boss");
+    assert.equal(rejected?.status, "rejected");
+    const after = await pages.get(page.id);
+    assert.match(after!.plainText, /keep me/);
+    assert.doesNotMatch(after!.plainText, /rejected body/);
+  });
+});
+
+test("approving a stale suggestion conflicts (target changed since base)", async () => {
+  await withStores(async ({ pages, suggestions }) => {
+    const page = await pages.create({ title: "Race", html: "<h1>Race</h1><p>v1</p>", actor: "owner" });
+    const sug = await suggestions.create({ targetPageId: page.id, proposedMarkdown: "# Race\n\nfrom-suggestion\n", title: "S", author: "ada" });
+    // someone edits the page directly after the proposal was drafted
+    const v1 = await pages.pageVersion(page.slug);
+    await pages.update(page.id, { html: "<h1>Race</h1><p>v2</p>", actor: "owner", baseVersion: v1 });
+    // approving now must conflict rather than clobber the v2 edit
+    await assert.rejects(() => suggestions.approve(sug!.id, "boss"), /Stale write|conflict/i);
+  });
+});

@@ -83,6 +83,10 @@ export function routeRequirement(method: string, path: string): RouteRequirement
   if (ADMIN_PATTERNS.some((re) => re.test(path))) return { kind: "role", role: "admin" };
   const verb = method.toUpperCase();
   const isWrite = verb !== "GET" && verb !== "HEAD" && verb !== "OPTIONS";
+  // Proposing a suggestion is open to any authenticated user (the suggest-changes
+  // path is precisely for people without direct write); approving/rejecting it is
+  // a real write handled by the default editor+ rule below.
+  if (isWrite && /^\/api\/pages\/[^/]+\/suggestions$/.test(path)) return { kind: "role", role: "viewer" };
   return { kind: "role", role: isWrite ? "editor" : "viewer" };
 }
 

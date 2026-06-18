@@ -535,6 +535,10 @@ async function main() {
       await handleProvidersCommand([subcommand, ...rest].filter((x): x is string => Boolean(x)));
       return;
     }
+    if (command === "suggestions") {
+      await handleSuggestionsCommand(subcommand, rest);
+      return;
+    }
 
     throw new Error(`Unknown command: ${command}`);
   }
@@ -1089,6 +1093,63 @@ async function handleConversationsCommand(subcommand: string | undefined, rest: 
     return;
   }
   throw new Error(`Unknown conversations subcommand: ${subcommand ?? "(none)"}. Try: list [--status --agent], show <id>, archive <id>`);
+}
+
+async function handleSuggestionsCommand(subcommand: string | undefined, rest: string[]) {
+  // Suggest-changes is a server-mediated flow (approval applies through the single
+  // writer), so it always goes through the API — there is no --direct path.
+  const { flags, positionals, useApi } = await agentMode(rest);
+  if (!useApi) {
+    throw new Error("Company Brain API is not reachable. Suggest-changes requires the server (no --direct path).");
+  }
+  if (subcommand === "list") {
+    const params = new URLSearchParams();
+    const status = flagString(flags, "status");
+    const target = flagString(flags, "target");
+    if (status) params.set("status", status);
+    if (target) params.set("target", target);
+    const query = params.toString();
+    const data = await requestApi<{ suggestions: unknown[] }>(`/api/suggestions${query ? `?${query}` : ""}`);
+    printJson({ suggestions: data.suggestions });
+    return;
+  }
+  if (subcommand === "get") {
+    const id = positionals[0];
+    if (!id) throw new Error("suggestions get requires <id>");
+    const data = await requestApi<{ suggestion: unknown }>(`/api/suggestions/${encodeURIComponent(id)}`);
+    printJson({ suggestion: data.suggestion });
+    return;
+  }
+  if (subcommand === "create") {
+    const pageId = positionals[0];
+    const title = flagString(flags, "title");
+    const markdownFile = flagString(flags, "markdown-file");
+    const proposedMarkdown = flagString(flags, "markdown") ?? (markdownFile ? await readFile(markdownFile, "utf8") : undefined);
+    if (!pageId || !title || !proposedMarkdown) {
+      throw new Error("suggestions create requires <pageId> --title and --markdown or --markdown-file");
+    }
+    const actor = flagString(flags, "actor") ?? "cli";
+    const data = await requestApi<{ suggestion: unknown }>(`/api/pages/${encodeURIComponent(pageId)}/suggestions`, {
+      method: "POST",
+      body: JSON.stringify({ proposedMarkdown, title, actor })
+    });
+    printJson({ suggestion: data.suggestion });
+    return;
+  }
+  if (subcommand === "approve" || subcommand === "reject") {
+    const id = positionals[0];
+    if (!id) throw new Error(`suggestions ${subcommand} requires <id>`);
+    const actor = flagString(flags, "actor") ?? "cli";
+    const data = await requestApi<{ suggestion: unknown }>(`/api/suggestions/${encodeURIComponent(id)}/${subcommand}`, {
+      method: "POST",
+      body: JSON.stringify({ actor })
+    });
+    printJson({ suggestion: data.suggestion });
+    return;
+  }
+  throw new Error(
+    `Unknown suggestions subcommand: ${subcommand ?? "(none)"}. Try: list [--status --target], get <id>, create <pageId> --title --markdown, approve <id>, reject <id>`
+  );
 }
 
 async function handleProvidersCommand(rest: string[]) {

@@ -9,6 +9,7 @@ import { readCookie, verifySignedValue, roleAtLeast, routeRequirement, SESSION_C
 import { buildAuth } from "./auth.ts";
 import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
+import { createSuggestionStore, reindexAllSuggestions, suggestionsCommitHook } from "@company-brain/suggestions";
 import {
   createAgentStore,
   createProviderRegistry,
@@ -108,6 +109,8 @@ const workspace = createWorkspace({ workspaceDir });
 const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
 const memory = await createMemoryStore(db, { gitWriter, workspace });
+gitWriter.addCommitHook(suggestionsCommitHook(db, workspace));
+const suggestions = await createSuggestionStore(db, { gitWriter, workspace, pages });
 
 // Agent runtime: provider registry (local-CLI providers), the agent store, and
 // the in-process scheduler. The scheduler can run installed agent CLIs on a
@@ -227,7 +230,49 @@ app.post("/api/admin/reindex", async (c) => {
   await reindexAllPages(db, workspace);
   await reindexAllEntities(db, workspace);
   await reindexAllAgentAreas(db, workspace);
+  await reindexAllSuggestions(db, workspace);
   return c.json({ ok: true });
+});
+
+// --- Suggest-changes --------------------------------------------------------
+
+app.post("/api/pages/:id/suggestions", async (c) => {
+  const body = z.object({ proposedMarkdown: z.string().min(1), title: z.string().min(1), actor: z.string().min(1).optional() }).parse(await c.req.json());
+  const suggestion = await suggestions.create({
+    targetPageId: c.req.param("id"),
+    proposedMarkdown: body.proposedMarkdown,
+    title: body.title,
+    author: committer(c, body.actor),
+  });
+  if (!suggestion) return c.json({ error: "Page not found" }, 404);
+  return c.json({ suggestion }, 201);
+});
+
+app.get("/api/suggestions", async (c) => {
+  const status = c.req.query("status");
+  const target = c.req.query("target");
+  const valid = status === "open" || status === "approved" || status === "rejected" ? status : undefined;
+  return c.json({ suggestions: await suggestions.list({ status: valid, targetPageId: target ?? undefined }) });
+});
+
+app.get("/api/suggestions/:id", async (c) => {
+  const suggestion = await suggestions.get(c.req.param("id"));
+  if (!suggestion) return c.json({ error: "Suggestion not found" }, 404);
+  return c.json({ suggestion });
+});
+
+app.post("/api/suggestions/:id/approve", async (c) => {
+  const body = z.object({ actor: z.string().min(1).optional() }).parse(await c.req.json().catch(() => ({})));
+  const suggestion = await suggestions.approve(c.req.param("id"), committer(c, body.actor));
+  if (!suggestion) return c.json({ error: "Suggestion not found" }, 404);
+  return c.json({ suggestion });
+});
+
+app.post("/api/suggestions/:id/reject", async (c) => {
+  const body = z.object({ actor: z.string().min(1).optional() }).parse(await c.req.json().catch(() => ({})));
+  const suggestion = await suggestions.reject(c.req.param("id"), committer(c, body.actor));
+  if (!suggestion) return c.json({ error: "Suggestion not found" }, 404);
+  return c.json({ suggestion });
 });
 
 // --- Agent runtime: agents, jobs, conversations, providers ------------------

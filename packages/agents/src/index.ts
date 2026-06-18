@@ -380,16 +380,23 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
       slug: string,
       markdown: string,
       actor = "local-user",
-      patch?: { name?: string; provider?: string; model?: string; enabled?: boolean }
+      patch?: { name?: string; provider?: string; model?: string; enabled?: boolean },
+      opts?: { exclusive?: boolean }
     ): Promise<Agent | null> {
       if (!fileMode) throw new Error("Editing agent files requires file mode (gitWriter + workspace).");
       const ws = workspace!;
       await gitWriter!.enqueue({
         paths: [ws.agentFilePath(slug)],
-        message: `agent: edit ${slug}`,
+        message: `agent: ${opts?.exclusive ? "create" : "edit"} ${slug}`,
         actor: { name: actor },
         write: async () => {
           const cur = await ws.readAgent(slug);
+          // Exclusive create: refuse if the canonical workspace file already exists.
+          // Checked here (inside the serialized writer) against files — not the derived
+          // index — so a stale/empty index can't let setup clobber an existing persona.
+          if (opts?.exclusive && cur) {
+            throw new Error(`Agent "${slug}" already exists`);
+          }
           // Preserve existing frontmatter identity/config; apply the patch (lets the
           // UI set provider/model/name/enabled, not just the system-prompt body).
           // NOTE: for a new agent `id` is absent here, but writeFileIn's ensureId
@@ -401,7 +408,7 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
           if (patch?.provider !== undefined) frontmatter.provider = patch.provider;
           if (patch?.model !== undefined) frontmatter.model = patch.model;
           if (patch?.enabled !== undefined) frontmatter.enabled = patch.enabled;
-          await ws.writeAgent(slug, { frontmatter, markdown }, new Date().toISOString());
+          await ws.writeAgent(slug, { frontmatter, markdown }, new Date().toISOString(), { exclusive: opts?.exclusive });
         },
       });
       return this.getAgent(slug);

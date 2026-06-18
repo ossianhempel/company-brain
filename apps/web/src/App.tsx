@@ -551,7 +551,9 @@ export function App() {
       if (providersRes.ok) {
         const { providers: detected } = (await providersRes.json()) as { providers: ProviderStatus[] };
         setProviders(detected);
-        setOnbProvider(detected.find((p) => p.detection.available)?.id ?? detected[0]?.id ?? "");
+        // Default to the first *available* CLI; if none can run, default to "(none)"
+        // rather than an unavailable provider whose <option> is disabled.
+        setOnbProvider(detected.find((p) => p.detection.available)?.id ?? "");
       }
       setOnboardingOpen(true);
     })();
@@ -569,7 +571,9 @@ export function App() {
     setOnbError(null);
     try {
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
-      // The wizard is re-openable via Setup — don't clobber an existing agent.
+      // The wizard is re-openable via Setup. Index check for a friendly message;
+      // exclusive:true is the authoritative guard (server checks the canonical file
+      // inside the writer, so a stale index can't let this overwrite an existing persona).
       const existing = await fetch(`/api/agents/${encodeURIComponent(slug)}`);
       if (existing.ok) {
         setOnbError(`An agent "${slug}" already exists — choose a different name (or edit it in Team).`);
@@ -578,7 +582,7 @@ export function App() {
       const response = await fetch(`/api/agents/${encodeURIComponent(slug)}/file`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markdown: onbPersona, name, provider: onbProvider || undefined, actor: "web" })
+        body: JSON.stringify({ markdown: onbPersona, name, provider: onbProvider || undefined, actor: "web", exclusive: true })
       });
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string };

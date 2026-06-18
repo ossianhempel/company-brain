@@ -105,3 +105,19 @@ test("saveAgentFile gives a new agent a stable id (no churn on re-save)", async 
     assert.equal(all.filter((a) => a.slug === "scribe").length, 1); // no duplicate row
   });
 });
+
+test("saveAgentFile exclusive create refuses to overwrite an existing canonical file", async () => {
+  await withStore(async (store) => {
+    await store.saveAgentFile("scribe", "v1", "web", undefined, { exclusive: true });
+    const first = await store.getAgent("scribe");
+    assert.ok(first?.id);
+    // a second exclusive create must reject (checked against the file, not the index)
+    await assert.rejects(
+      () => store.saveAgentFile("scribe", "v2", "web", undefined, { exclusive: true }),
+      /already exists/i
+    );
+    // a non-exclusive edit still works
+    const edited = await store.saveAgentFile("scribe", "v3", "web");
+    assert.ok(edited);
+  });
+});

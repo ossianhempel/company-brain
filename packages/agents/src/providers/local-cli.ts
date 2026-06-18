@@ -33,9 +33,12 @@ export interface LocalCliConfig {
 }
 
 /**
- * Parse CLI stdout. Understands a stream of JSON lines (Claude/Codex headless
- * `--output-format json` shape: assistant message content + a result/usage
- * line); falls back to treating the whole stdout as one agent turn.
+ * Parse CLI stdout. Understands two JSON-lines shapes and falls back to treating
+ * the whole stdout as one agent turn:
+ *  - Claude headless `--output-format json`: `{type:"assistant", message:{content:[…]}}`
+ *    plus a `{type:"result", result}` / `{usage}` line.
+ *  - Codex `exec --json`: `{type:"item.completed", item:{type:"agent_message", text}}`
+ *    for the assistant text, with usage on a `{type:"turn.completed", usage}` event.
  */
 export function defaultParseOutput(stdout: string): { turns: ProviderTurn[]; usage?: Record<string, unknown> } {
   const assistantTexts: string[] = [];
@@ -62,6 +65,11 @@ export function defaultParseOutput(stdout: string): { turns: ProviderTurn[]; usa
         .map((c) => c.text)
         .join("");
       if (text) assistantTexts.push(text);
+    }
+    // Codex exec --json: the final assistant text arrives as an agent_message item.
+    const item = obj.item as { type?: string; text?: string } | undefined;
+    if (obj.type === "item.completed" && item?.type === "agent_message" && typeof item.text === "string") {
+      if (item.text) assistantTexts.push(item.text);
     }
     if (obj.usage && typeof obj.usage === "object") usage = obj.usage as Record<string, unknown>;
     if (obj.type === "result" && typeof obj.result === "string") resultText = obj.result;
@@ -129,7 +137,9 @@ export function codexLocalProvider(runner?: CommandRunner): Provider {
     {
       id: "codex_local",
       candidates: ["codex"],
-      buildArgs: (input) => ["exec", "--json", ...(input.model ? ["--model", input.model] : [])],
+      // `codex exec` requires a Git repo and exits otherwise; we run from a neutral
+      // scratch cwd (tmpdir), so --skip-git-repo-check is required for it to run.
+      buildArgs: (input) => ["exec", "--json", "--skip-git-repo-check", ...(input.model ? ["--model", input.model] : [])],
       buildInput: combinePrompts,
     },
     runner

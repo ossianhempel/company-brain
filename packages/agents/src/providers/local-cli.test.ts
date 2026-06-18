@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CommandRunner, ExecResult } from "../provider.ts";
-import { createLocalCliProvider, defaultParseOutput, claudeLocalProvider } from "./local-cli.ts";
+import { createLocalCliProvider, defaultParseOutput, claudeLocalProvider, codexLocalProvider } from "./local-cli.ts";
 
 function runner(opts: {
   path?: string;
@@ -111,4 +111,32 @@ test("spawns the CLI in a scratch cwd, not the workspace", async () => {
   await claudeLocalProvider(r).run({ systemPrompt: "s", prompt: "p" });
   assert.equal(typeof seenCwd, "string");
   assert.notEqual(seenCwd, process.cwd()); // not the server/workspace cwd
+});
+
+test("parses Codex exec --json agent_message events into turns + usage", () => {
+  const stdout = [
+    JSON.stringify({ type: "item.started", item: { type: "agent_message" } }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Codex answer." } }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 7 } }),
+  ].join("\n");
+  const parsed = defaultParseOutput(stdout);
+  assert.equal(parsed.turns.length, 1);
+  assert.equal(parsed.turns[0].content, "Codex answer.");
+  assert.deepEqual(parsed.usage, { input_tokens: 10, output_tokens: 7 });
+});
+
+test("codexLocalProvider passes --skip-git-repo-check (exec requires a git repo)", async () => {
+  const execArgs: string[][] = [];
+  const provider = codexLocalProvider(
+    runner({
+      path: "/bin/codex",
+      run: { code: 0, stdout: JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "ok" } }), stderr: "", timedOut: false },
+      onExec: (_cmd, args) => execArgs.push(args),
+    })
+  );
+  const result = await provider.run({ systemPrompt: "", prompt: "hi" });
+  assert.equal(result.status, "done");
+  const runCall = execArgs.find((args) => args.includes("exec"));
+  assert.ok(runCall, "expected a codex exec call");
+  assert.ok(runCall!.includes("--skip-git-repo-check"), "exec args must include --skip-git-repo-check");
 });

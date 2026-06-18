@@ -315,16 +315,28 @@ app.put("/api/agents/:slug/file", async (c) => {
       name: z.string().min(1).optional(),
       provider: z.string().optional(),
       model: z.string().optional(),
-      enabled: z.boolean().optional()
+      enabled: z.boolean().optional(),
+      exclusive: z.boolean().optional()
     })
     .parse(await c.req.json());
-  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, committer(c, body.actor), {
-    name: body.name,
-    provider: body.provider,
-    model: body.model,
-    enabled: body.enabled
-  });
-  return c.json({ agent });
+  // Phase 5: actor derived from the authenticated principal (committer). Phase 4:
+  // exclusive-create against the canonical file → 409. Both apply.
+  try {
+    const agent = await agents.saveAgentFile(
+      c.req.param("slug"),
+      body.markdown,
+      committer(c, body.actor),
+      { name: body.name, provider: body.provider, model: body.model, enabled: body.enabled },
+      { exclusive: body.exclusive }
+    );
+    return c.json({ agent });
+  } catch (err) {
+    // Exclusive-create against an existing canonical file → 409 (not a 500).
+    if (body.exclusive && err instanceof Error && /already exists/.test(err.message)) {
+      return c.json({ error: err.message }, 409);
+    }
+    throw err;
+  }
 });
 
 // HTTP-triggered runs spawn the agent's configured provider (local CLI = host

@@ -55,3 +55,25 @@ test("migration 13: live-only unique slug index allows a tombstoned + live agent
     assert.equal(live.rows[0].id, "new");
   });
 });
+
+test("migration 14: users/sessions/role_grants + suggestions tables are usable", async () => {
+  await withDb(async (db) => {
+    await db.query("insert into users (id, name, email, role) values ($1,$2,$3,$4)", ["u1", "Ada", "ada@x.io", "admin"]);
+    await db.query("insert into sessions (id, user_id, expires_at) values ($1,$2, now())", ["s1", "u1"]);
+    await db.query("insert into role_grants (id, user_id, scope, role) values ($1,$2,'workspace','editor')", ["g1", "u1"]);
+    await db.query(
+      "insert into suggestions (id, slug, target_page_id, author, status, title) values ($1,$2,$3,$4,'open',$5)",
+      ["sg1", "fix-home", "page-home", "ada", "Fix home"]
+    );
+    const u = await db.query<{ role: string }>("select role from users where id = $1", ["u1"]);
+    assert.equal(u.rows[0].role, "admin");
+    const sg = await db.query<{ status: string }>("select status from suggestions where slug = $1", ["fix-home"]);
+    assert.equal(sg.rows[0].status, "open");
+    // live-only unique slug: a tombstoned + live suggestion can share a slug
+    await db.query("update suggestions set deleted_at = now() where id = $1", ["sg1"]);
+    await db.query("insert into suggestions (id, slug, target_page_id, author, status, title) values ($1,$2,$3,$4,'open',$5)", ["sg2", "fix-home", "page-home", "bob", "Fix home again"]);
+    const live = await db.query<{ id: string }>("select id from suggestions where slug = $1 and deleted_at is null", ["fix-home"]);
+    assert.equal(live.rows.length, 1);
+    assert.equal(live.rows[0].id, "sg2");
+  });
+});

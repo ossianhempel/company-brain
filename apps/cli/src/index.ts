@@ -57,8 +57,12 @@ const migrationTables = [
   "memory_sources",
   "agents",
   "jobs",
-  "conversations"
+  "conversations",
+  "users",
+  "role_grants",
+  "suggestions"
 ];
+// sessions are intentionally omitted — ephemeral; users re-authenticate after a migrate.
 
 function parseFlags(args: string[]) {
   const flags: Flags = {};

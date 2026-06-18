@@ -30,6 +30,19 @@ export {
   type EmbeddableChunk,
   type StoredEmbedding,
 } from "./embedding-store.ts";
+export {
+  extractFromConversation,
+  parseExtraction,
+  buildExtractionPrompt,
+  EXTRACTION_SYSTEM_PROMPT,
+  MAX_MEMORIES,
+  MAX_ENTITIES,
+  ExtractionParseError,
+  type Extraction,
+  type ExtractionDeps,
+  type ExtractionOptions,
+  type ExtractionResult,
+} from "./extract.ts";
 
 /** Options enabling file-canonical memory: writes go to entity files + git. */
 export interface MemoryStoreOptions {

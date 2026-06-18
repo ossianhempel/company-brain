@@ -109,11 +109,24 @@ export async function reindexEmbeddings(db: CompanyBrainDb, embeddings?: Embeddi
   }
 }
 
-/** Load all stored embeddings for a model (the PGlite brute-force vector pool). */
+/** Max embeddings pulled into memory for the brute-force vector scan. Bounds the O(N)
+ *  cost on PGlite; when exceeded, the oldest embeddings fall out of the pool (a recall
+ *  recency limit — documented). NOTE: the indexed ANN path (pgvector `<=>` query) on
+ *  large Postgres deployments is a deferred follow-up; today both backends brute-force. */
+export const MAX_VECTOR_POOL = 5000;
+
+/** Load stored embeddings for a model (the brute-force vector pool), most-recent first,
+ *  bounded by MAX_VECTOR_POOL with a log when the bound truncates the pool. */
 export async function loadEmbeddings(db: CompanyBrainDb, model: string): Promise<StoredEmbedding[]> {
+  const total = await db.query<{ c: number }>("select count(*)::int as c from chunk_embeddings where model = $1", [model]);
+  if ((total.rows[0]?.c ?? 0) > MAX_VECTOR_POOL) {
+    console.warn(
+      `[embeddings] vector pool for model ${model} has ${total.rows[0].c} rows; scanning the newest ${MAX_VECTOR_POOL} (brute-force limit). Use Postgres + pgvector for ANN at scale.`
+    );
+  }
   const rows = await db.query<{ chunk_type: ChunkType; owner_id: string; chunk_index: number; vector_json: string }>(
-    "select chunk_type, owner_id, chunk_index, vector_json from chunk_embeddings where model = $1",
-    [model]
+    "select chunk_type, owner_id, chunk_index, vector_json from chunk_embeddings where model = $1 order by created_at desc limit $2",
+    [model, MAX_VECTOR_POOL]
   );
   return rows.rows.map((r) => ({
     chunkType: r.chunk_type,

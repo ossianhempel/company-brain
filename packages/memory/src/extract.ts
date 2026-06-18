@@ -42,6 +42,11 @@ export interface Extraction {
 
 export class ExtractionParseError extends Error {}
 
+/** Case/whitespace-insensitive normalize for quote-in-transcript verification. */
+function normalizeContent(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 /** Neutralize any literal <transcript>/</transcript> tags in untrusted content so a
  *  turn can't forge or close the delimiter boundary (prompt-injection break-out). */
 function neutralizeDelimiter(text: string): string {
@@ -145,6 +150,8 @@ export interface ExtractionResult {
   landed: number;
   /** Count of extracted memories deduped against an existing fact (not re-saved). */
   deduped: number;
+  /** Count rejected because the cited quote was not found in the transcript. */
+  rejected: number;
   reason?: string;
 }
 
@@ -156,25 +163,25 @@ export async function extractFromConversation(
   opts: ExtractionOptions
 ): Promise<ExtractionResult> {
   const actor = opts.actor ?? "extractor";
-  if (!opts.enabled) return { status: "skipped", landed: 0, deduped: 0, reason: "extraction disabled" };
+  if (!opts.enabled) return { status: "skipped", landed: 0, deduped: 0, rejected: 0, reason: "extraction disabled" };
 
   const turns = await deps.getTranscript(conversationId);
-  if (!turns || turns.length === 0) return { status: "skipped", landed: 0, deduped: 0, reason: "no transcript" };
+  if (!turns || turns.length === 0) return { status: "skipped", landed: 0, deduped: 0, rejected: 0, reason: "no transcript" };
 
   let text: string;
   try {
     text = await deps.runProvider(EXTRACTION_SYSTEM_PROMPT, buildExtractionPrompt(turns));
   } catch (err) {
-    return { status: "skipped", landed: 0, deduped: 0, reason: `provider error: ${err instanceof Error ? err.message : err}` };
+    return { status: "skipped", landed: 0, deduped: 0, rejected: 0, reason: `provider error: ${err instanceof Error ? err.message : err}` };
   }
 
   let extraction: Extraction;
   try {
     extraction = parseExtraction(text, { confidenceThreshold: opts.confidenceThreshold });
   } catch (err) {
-    return { status: "skipped", landed: 0, deduped: 0, reason: err instanceof ExtractionParseError ? err.message : "parse error" };
+    return { status: "skipped", landed: 0, deduped: 0, rejected: 0, reason: err instanceof ExtractionParseError ? err.message : "parse error" };
   }
-  if (extraction.memories.length === 0) return { status: "extracted", landed: 0, deduped: 0 };
+  if (extraction.memories.length === 0) return { status: "extracted", landed: 0, deduped: 0, rejected: 0 };
 
   // Ingest the transcript artifact LAZILY — only once we know a memory will actually
   // land — so a fully-deduped (no-op) re-extraction doesn't create a duplicate artifact.
@@ -184,9 +191,20 @@ export async function extractFromConversation(
     return artifactId;
   };
 
+  // Provenance integrity: the cited quote must actually appear in the transcript.
+  // A hallucinated or injected quote (e.g. an attacker-authored "remember: ..." line
+  // the model echoes as its own fabrication) is rejected rather than stored as a
+  // citation, so extracted memories can't carry fabricated provenance.
+  const haystack = normalizeContent(turns.map((t) => t.content).join("\n"));
+
   let landed = 0;
   let deduped = 0;
+  let rejected = 0;
   for (const m of extraction.memories) {
+    if (!haystack.includes(normalizeContent(m.quote))) {
+      rejected++;
+      continue;
+    }
     const slug = deps.entitySlug(m.subject);
     // Dedup: an existing active fact with the same (entity, kind, content) → skip.
     // (Extraction does not auto-supersede the fact a contradiction negates — it can't
@@ -207,5 +225,5 @@ export async function extractFromConversation(
     });
     if (id) landed++;
   }
-  return { status: "extracted", landed, deduped };
+  return { status: "extracted", landed, deduped, rejected };
 }

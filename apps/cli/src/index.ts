@@ -360,7 +360,12 @@ async function recall(query: string, limit: number, useApi: boolean, mode?: Reca
     return requestApi<RecallResponse>(`/api/recall?${params}`);
   }
 
-  return (await createMemoryStore()).recall(query, limit, mode);
+  // Direct mode: wire the env-configured embedding registry so hybrid_rrf_v1 can embed
+  // the query (else --direct hybrid would silently degrade to BM25 even with embeddings).
+  const embeddings = createEmbeddingRegistry();
+  const embeddingConfig = apiEmbeddingConfigFromEnv();
+  if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingConfig));
+  return (await createMemoryStore(undefined, { embeddings })).recall(query, limit, mode);
 }
 
 async function getPage(ref: string, useApi: boolean) {

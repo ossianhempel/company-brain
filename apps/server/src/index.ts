@@ -176,10 +176,6 @@ const extractionDeps: ExtractionDeps = {
     });
     return saved?.id ?? null;
   },
-  supersedeMemory: async (oldId, input, actor) => {
-    const saved = await memory.supersedeMemory(oldId, input, actor);
-    return saved?.id ?? null;
-  },
   findExistingFact: (entitySlug, kind, content) => memory.findExistingFact(entitySlug, kind, content),
   entitySlug: slugifyMemory,
 };
@@ -191,7 +187,11 @@ const agents = await createAgentStore(db, {
   // identity (so a prompt-submitting editor can't write memories they couldn't directly).
   onConversationComplete: memoryExtractionEnabled
     ? (conversation) => {
-        void extractFromConversation(conversation.id, extractionDeps, { enabled: true, actor: "system:extractor" });
+        // Fire-and-forget (don't block the run on extraction), but attach a catch so a
+        // background ingest/write failure can't become an unhandled promise rejection.
+        void extractFromConversation(conversation.id, extractionDeps, { enabled: true, actor: "system:extractor" }).catch(
+          (err) => console.error("[extraction] auto-extract failed:", err instanceof Error ? err.message : err)
+        );
       }
     : undefined,
 });

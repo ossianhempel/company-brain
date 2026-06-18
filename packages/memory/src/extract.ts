@@ -122,8 +122,6 @@ export interface ExtractionDeps {
     artifactId: string;
     quote: string;
   }) => Promise<string | null>;
-  /** Supersede an existing memory with a replacement. */
-  supersedeMemory: (oldId: string, input: { kind: MemoryKind; content: string; confidence: number }, actor: string) => Promise<string | null>;
   /** Dedup probe: an active fact matching (entitySlug, kind, content), or null. */
   findExistingFact: (entitySlug: string, kind: MemoryKind, content: string) => Promise<{ id: string } | null>;
   /** Slugify a subject into an entity slug (mirrors the memory store's slugify). */
@@ -139,7 +137,8 @@ export interface ExtractionOptions {
 export interface ExtractionResult {
   status: "extracted" | "skipped";
   landed: number;
-  superseded: number;
+  /** Count of extracted memories deduped against an existing fact (not re-saved). */
+  deduped: number;
   reason?: string;
 }
 
@@ -151,39 +150,44 @@ export async function extractFromConversation(
   opts: ExtractionOptions
 ): Promise<ExtractionResult> {
   const actor = opts.actor ?? "extractor";
-  if (!opts.enabled) return { status: "skipped", landed: 0, superseded: 0, reason: "extraction disabled" };
+  if (!opts.enabled) return { status: "skipped", landed: 0, deduped: 0, reason: "extraction disabled" };
 
   const turns = await deps.getTranscript(conversationId);
-  if (!turns || turns.length === 0) return { status: "skipped", landed: 0, superseded: 0, reason: "no transcript" };
+  if (!turns || turns.length === 0) return { status: "skipped", landed: 0, deduped: 0, reason: "no transcript" };
 
   let text: string;
   try {
     text = await deps.runProvider(EXTRACTION_SYSTEM_PROMPT, buildExtractionPrompt(turns));
   } catch (err) {
-    return { status: "skipped", landed: 0, superseded: 0, reason: `provider error: ${err instanceof Error ? err.message : err}` };
+    return { status: "skipped", landed: 0, deduped: 0, reason: `provider error: ${err instanceof Error ? err.message : err}` };
   }
 
   let extraction: Extraction;
   try {
     extraction = parseExtraction(text, { confidenceThreshold: opts.confidenceThreshold });
   } catch (err) {
-    return { status: "skipped", landed: 0, superseded: 0, reason: err instanceof ExtractionParseError ? err.message : "parse error" };
+    return { status: "skipped", landed: 0, deduped: 0, reason: err instanceof ExtractionParseError ? err.message : "parse error" };
   }
-  if (extraction.memories.length === 0) return { status: "extracted", landed: 0, superseded: 0 };
+  if (extraction.memories.length === 0) return { status: "extracted", landed: 0, deduped: 0 };
 
-  const artifactId = await deps.ingestTranscript(conversationId, buildExtractionPrompt(turns));
+  // Ingest the transcript artifact LAZILY — only once we know a memory will actually
+  // land — so a fully-deduped (no-op) re-extraction doesn't create a duplicate artifact.
+  let artifactId: string | null = null;
+  const ensureArtifact = async (): Promise<string> => {
+    if (artifactId === null) artifactId = await deps.ingestTranscript(conversationId, buildExtractionPrompt(turns));
+    return artifactId;
+  };
+
   let landed = 0;
-  let superseded = 0;
+  let deduped = 0;
   for (const m of extraction.memories) {
     const slug = deps.entitySlug(m.subject);
-    const existing = await deps.findExistingFact(slug, m.kind, m.content);
-    if (existing) {
-      // identical content already recorded → skip (dedup); a contradiction kind
-      // supersedes the prior fact instead of appending a near-duplicate.
-      if (m.kind === "contradiction") {
-        const id = await deps.supersedeMemory(existing.id, { kind: m.kind, content: m.content, confidence: m.confidence }, actor);
-        if (id) superseded++;
-      }
+    // Dedup: an existing active fact with the same (entity, kind, content) → skip.
+    // (Extraction does not auto-supersede the fact a contradiction negates — it can't
+    // reliably identify the target from the model output; supersede is an explicit
+    // primitive. Deferred: extraction-driven supersede when the target is identifiable.)
+    if (await deps.findExistingFact(slug, m.kind, m.content)) {
+      deduped++;
       continue;
     }
     const id = await deps.saveMemory({
@@ -192,10 +196,10 @@ export async function extractFromConversation(
       content: m.content,
       confidence: m.confidence,
       actor,
-      artifactId,
+      artifactId: await ensureArtifact(),
       quote: m.quote,
     });
     if (id) landed++;
   }
-  return { status: "extracted", landed, superseded };
+  return { status: "extracted", landed, deduped };
 }

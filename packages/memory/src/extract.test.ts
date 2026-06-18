@@ -73,26 +73,27 @@ test("parseExtraction caps memories per run", () => {
 
 // --- orchestration with fake deps -------------------------------------------
 
-function fakeDeps(over: Partial<ExtractionDeps> = {}): ExtractionDeps & { saved: unknown[]; superseded: string[] } {
+function fakeDeps(over: Partial<ExtractionDeps> = {}): ExtractionDeps & { saved: unknown[]; ingestCalls: number } {
   const saved: unknown[] = [];
-  const superseded: string[] = [];
+  const counters = { ingestCalls: 0 };
   const base: ExtractionDeps = {
     runProvider: async () => JSON.stringify({ memories: [{ kind: "fact", subject: "ada", content: "likes ts", confidence: 0.9, quote: "q" }], entities: [] }),
     getTranscript: async () => [{ role: "user", content: "ada likes ts" }],
-    ingestTranscript: async () => "artifact-1",
+    ingestTranscript: async () => {
+      counters.ingestCalls++;
+      return "artifact-1";
+    },
     saveMemory: async (input) => {
       saved.push(input);
       return `mem-${saved.length}`;
-    },
-    supersedeMemory: async (oldId) => {
-      superseded.push(oldId);
-      return "mem-sup";
     },
     findExistingFact: async () => null,
     entitySlug: (s) => s.toLowerCase().replace(/\s+/g, "-"),
     ...over,
   };
-  return Object.assign(base, { saved, superseded });
+  const result = Object.assign(base, { saved }) as ExtractionDeps & { saved: unknown[]; ingestCalls: number };
+  Object.defineProperty(result, "ingestCalls", { get: () => counters.ingestCalls });
+  return result;
 }
 
 test("disabled → skipped, writes nothing", async () => {
@@ -132,16 +133,24 @@ test("injection: a fabricated memory still lands only via saveMemory (attributed
   assert.equal((deps.saved[0] as { actor: string }).actor, "agent:x"); // attributed, reversible
 });
 
-test("dedup skips an existing fact; a contradiction supersedes it", async () => {
+test("dedup skips an existing fact and does NOT ingest a transcript artifact on a no-op", async () => {
   const dedup = fakeDeps({ findExistingFact: async () => ({ id: "old-1" }) });
-  const r1 = await extractFromConversation("c1", dedup, { enabled: true });
-  assert.equal(r1.landed, 0); // existing fact → skipped (not a duplicate)
+  const r = await extractFromConversation("c1", dedup, { enabled: true });
+  assert.equal(r.landed, 0);
+  assert.equal(r.deduped, 1); // existing fact → deduped, not re-saved
+  assert.equal(dedup.saved.length, 0);
+  assert.equal(dedup.ingestCalls, 0); // lazy: no artifact created when nothing lands
+});
 
-  const contra = fakeDeps({
-    findExistingFact: async () => ({ id: "old-2" }),
-    runProvider: async () => JSON.stringify({ memories: [{ kind: "contradiction", subject: "ada", content: "no longer likes ts", confidence: 0.9, quote: "q" }], entities: [] }),
+test("a real landing ingests the transcript artifact exactly once", async () => {
+  const deps = fakeDeps({
+    runProvider: async () =>
+      JSON.stringify({ memories: [
+        { kind: "fact", subject: "ada", content: "a", confidence: 0.9, quote: "q" },
+        { kind: "fact", subject: "ada", content: "b", confidence: 0.9, quote: "q" },
+      ], entities: [] }),
   });
-  const r2 = await extractFromConversation("c1", contra, { enabled: true });
-  assert.equal(r2.superseded, 1);
-  assert.deepEqual(contra.superseded, ["old-2"]);
+  const r = await extractFromConversation("c1", deps, { enabled: true });
+  assert.equal(r.landed, 2);
+  assert.equal(deps.ingestCalls, 1); // one artifact shared across the run's memories
 });

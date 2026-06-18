@@ -1054,14 +1054,14 @@ export function App() {
     await loadEntities();
   }
 
-  async function runRecall(searchQuery = recallQuery) {
+  async function runRecall(searchQuery = recallQuery, mode = recallMode) {
     const normalized = searchQuery.trim();
     if (!normalized) {
       setRecall(null);
       return;
     }
 
-    const params = new URLSearchParams({ q: normalized, limit: "12", mode: recallMode });
+    const params = new URLSearchParams({ q: normalized, limit: "12", mode });
     const response = await fetch(`/api/recall?${params}`);
     setRecall((await response.json()) as RecallResponse);
   }
@@ -2010,8 +2010,9 @@ export function App() {
                     <select
                       value={recallMode}
                       onChange={(event) => {
-                        setRecallMode(event.target.value as typeof recallMode);
-                        if (recallQuery.trim()) void runRecall();
+                        const next = event.target.value as typeof recallMode;
+                        setRecallMode(next);
+                        if (recallQuery.trim()) void runRecall(recallQuery, next); // pass mode (state is async)
                       }}
                     >
                       <option value="bm25_local_v1">BM25 (keyword)</option>

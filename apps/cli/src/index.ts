@@ -7,6 +7,10 @@ import { createGitWriter } from "@company-brain/git-writer";
 import {
   createMemoryStore,
   reindexAllEntities,
+  createEmbeddingRegistry,
+  createApiEmbeddingProvider,
+  apiEmbeddingConfigFromEnv,
+  reindexEmbeddings,
   type MemoryKind,
   type MemorySource,
   type RecallResponse,
@@ -63,6 +67,7 @@ const migrationTables = [
   "suggestions"
 ];
 // sessions are intentionally omitted — ephemeral; users re-authenticate after a migrate.
+// chunk_embeddings is intentionally omitted — derived; `reindex` recomputes it after a migrate.
 
 function parseFlags(args: string[]) {
   const flags: Flags = {};
@@ -340,8 +345,8 @@ function recallModeFromFlags(flags: Flags): RecallSearchMode | undefined {
   if (!mode) {
     return undefined;
   }
-  if (mode !== "bm25_local_v1" && mode !== "lexical_v1") {
-    throw new Error("memory recall --mode must be bm25_local_v1 or lexical_v1");
+  if (mode !== "bm25_local_v1" && mode !== "lexical_v1" && mode !== "hybrid_rrf_v1") {
+    throw new Error("memory recall --mode must be bm25_local_v1, lexical_v1, or hybrid_rrf_v1");
   }
   return mode;
 }
@@ -355,7 +360,12 @@ async function recall(query: string, limit: number, useApi: boolean, mode?: Reca
     return requestApi<RecallResponse>(`/api/recall?${params}`);
   }
 
-  return (await createMemoryStore()).recall(query, limit, mode);
+  // Direct mode: wire the env-configured embedding registry so hybrid_rrf_v1 can embed
+  // the query (else --direct hybrid would silently degrade to BM25 even with embeddings).
+  const embeddings = createEmbeddingRegistry();
+  const embeddingConfig = apiEmbeddingConfigFromEnv();
+  if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingConfig));
+  return (await createMemoryStore(undefined, { embeddings })).recall(query, limit, mode);
 }
 
 async function getPage(ref: string, useApi: boolean) {
@@ -508,8 +518,13 @@ async function main() {
     await reindexAllPages(db, workspace);
     await reindexAllEntities(db, workspace);
     await reindexAllAgentAreas(db, workspace);
+    // Rebuild derived embeddings too, when an embedding provider is configured (else no-op).
+    const embeddings = createEmbeddingRegistry();
+    const embeddingConfig = apiEmbeddingConfigFromEnv();
+    if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingConfig));
+    const embedded = await reindexEmbeddings(db, embeddings);
     await db.close();
-    printJson({ ok: true, mode: "direct" });
+    printJson({ ok: true, mode: "direct", embedded: embedded?.embedded ?? 0 });
     return;
   }
 
@@ -1249,6 +1264,23 @@ async function handleMemoryCommand(subcommand: string | undefined, rest: string[
         );
       }
     }
+    return;
+  }
+
+  if (subcommand === "extract") {
+    // Host execution (spawns an LLM) → server-mediated only; off by default + admin.
+    const conversationId = positionals[0];
+    if (!conversationId) throw new Error("memory extract requires <conversation-id>");
+    if (!useApi) throw new Error("memory extract requires the server (host execution; no --direct path).");
+    // Forward the host-execution run token in auth-off mode (the server requires it
+    // there). With auth on, requestApi already sends the user's API_TOKEN bearer.
+    const runToken = process.env.COMPANY_BRAIN_API_TOKEN ? undefined : process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+    const data = await requestApi<{ extraction: unknown }>(`/api/conversations/${encodeURIComponent(conversationId)}/extract`, {
+      method: "POST",
+      headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
+      body: JSON.stringify({})
+    });
+    printJson(data);
     return;
   }
 

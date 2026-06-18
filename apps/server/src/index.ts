@@ -7,7 +7,18 @@ import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writ
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 import { readCookie, verifySignedValue, roleAtLeast, routeRequirement, SESSION_COOKIE, type Principal } from "@company-brain/auth";
 import { buildAuth } from "./auth.ts";
-import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
+import {
+  createMemoryStore,
+  reindexAllEntities,
+  createEmbeddingRegistry,
+  createApiEmbeddingProvider,
+  apiEmbeddingConfigFromEnv,
+  reindexEmbeddings,
+  setupPgVector,
+  extractFromConversation,
+  slugifyMemory,
+  type ExtractionDeps,
+} from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 import { createSuggestionStore, reindexAllSuggestions, suggestionsCommitHook } from "@company-brain/suggestions";
 import {
@@ -17,6 +28,7 @@ import {
   reindexAllAgentAreas,
   claudeLocalProvider,
   codexLocalProvider,
+  runPrompt,
 } from "@company-brain/agents";
 
 const pageInput = z.object({
@@ -92,7 +104,9 @@ const memoryInput = z.object({
 const recallInput = z.object({
   q: z.string().min(1),
   limit: z.coerce.number().int().min(1).max(50).optional(),
-  mode: z.enum(["bm25_local_v1", "lexical_v1"]).optional()
+  mode: z.enum(["bm25_local_v1", "lexical_v1", "hybrid_rrf_v1"]).optional(),
+  kind: z.string().min(1).optional(),
+  subject: z.string().min(1).optional()
 });
 const memoryListInput = z.object({
   status: z.enum(["active", "superseded", "forgotten"]).optional(),
@@ -108,7 +122,47 @@ const workspaceDir = resolveWorkspaceDir();
 const workspace = createWorkspace({ workspaceDir });
 const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
-const memory = await createMemoryStore(db, { gitWriter, workspace });
+// Optional embedding provider for hybrid recall — off by default. Configured only
+// when COMPANY_BRAIN_EMBEDDING_* env is set; absent → recall stays BM25-only.
+const embeddings = createEmbeddingRegistry();
+const embeddingConfig = apiEmbeddingConfigFromEnv();
+if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingConfig));
+const memory = await createMemoryStore(db, { gitWriter, workspace, embeddings });
+// Optional pgvector groundwork (Postgres-only, autocommit, outside any migration).
+await setupPgVector(db, { isPostgres: Boolean(process.env.COMPANY_BRAIN_DATABASE_URL ?? process.env.DATABASE_URL) });
+// Keep hybrid-recall embeddings fresh after content writes (only when a provider is
+// configured). Runs AFTER the commit via setImmediate — best-effort + overlap-guarded —
+// so the network embed call never blocks the serialized writer; content-hash skip makes
+// it idempotent. (Source artifacts are DB-only; they embed on the next content commit or
+// an admin reindex.)
+let embedRunning = false;
+let embedQueued = false;
+function refreshEmbeddings(): void {
+  if (!embeddingConfig) return; // no-op when no embedding provider is configured
+  if (embedRunning) {
+    embedQueued = true;
+    return;
+  }
+  embedRunning = true;
+  setImmediate(() => {
+    void reindexEmbeddings(db, embeddings)
+      .catch((err) => console.error("[embeddings] refresh failed:", err instanceof Error ? err.message : err))
+      .finally(() => {
+        embedRunning = false;
+        if (embedQueued) {
+          embedQueued = false;
+          refreshEmbeddings();
+        }
+      });
+  });
+}
+// Pages/memory commit through git → refresh on the commit hook. Source artifacts are
+// DB-only (no commit) → routes that ingest them call refreshEmbeddings() directly.
+if (embeddingConfig) {
+  gitWriter.addCommitHook(({ paths }) => {
+    if (paths.some((p) => workspace.pathArea(p) === "pages" || workspace.pathArea(p) === "memory")) refreshEmbeddings();
+  });
+}
 gitWriter.addCommitHook(suggestionsCommitHook(db, workspace));
 const suggestions = await createSuggestionStore(db, { gitWriter, workspace, pages });
 
@@ -119,7 +173,63 @@ const suggestions = await createSuggestionStore(db, { gitWriter, workspace, page
 const providers = createProviderRegistry();
 providers.register(claudeLocalProvider());
 providers.register(codexLocalProvider());
-const agents = await createAgentStore(db, { gitWriter, workspace, providers });
+// Memory extraction (host execution) — OFF BY DEFAULT, mirrors the scheduler/run-API
+// gating. The deps bridge the agent runtime (provider + transcript) to the memory store.
+// A forward ref breaks the deps↔store cycle: deps.getTranscript reads the store lazily,
+// the store's auto-extract hook reads deps — both only at call time.
+const memoryExtractionEnabled = process.env.COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION === "1";
+let agentStoreRef: Awaited<ReturnType<typeof createAgentStore>> | null = null;
+const extractionDeps: ExtractionDeps = {
+  runProvider: async (systemPrompt, prompt) => {
+    const result = await runPrompt(providers, { systemPrompt, prompt });
+    if (result.status !== "done") throw new Error(result.error ?? "extraction provider failed");
+    return result.turns.map((t) => t.content).join("\n");
+  },
+  getTranscript: async (conversationId) => {
+    const conv = await agentStoreRef!.getConversation(conversationId);
+    return conv ? conv.turns.map((t) => ({ role: t.role, content: t.content })) : null;
+  },
+  ingestTranscript: async (conversationId, text) => {
+    const artifact = await memory.ingestArtifact({
+      sourceType: "conversation",
+      title: `conversation ${conversationId}`,
+      rawText: text,
+      actor: "extractor",
+    });
+    return artifact.id;
+  },
+  saveMemory: async (input) => {
+    const saved = await memory.saveMemory({
+      kind: input.kind,
+      subject: input.subject,
+      content: input.content,
+      confidence: input.confidence,
+      actor: input.actor,
+      sources: [{ sourceType: "artifact", artifactId: input.artifactId, pageId: null, pageChunkId: null, sourceChunkId: null, quote: input.quote }],
+    });
+    return saved?.id ?? null;
+  },
+  findExistingFact: (entitySlug, kind, content) => memory.findExistingFact(entitySlug, kind, content),
+  entitySlug: slugifyMemory,
+};
+const agents = await createAgentStore(db, {
+  gitWriter,
+  workspace,
+  providers,
+  // Auto-extract after a successful run — only when enabled; attributed to the system
+  // identity (so a prompt-submitting editor can't write memories they couldn't directly).
+  onConversationComplete: memoryExtractionEnabled
+    ? (conversation) => {
+        // Fire-and-forget (don't block the run on extraction), but attach a catch so a
+        // background ingest/write failure can't become an unhandled promise rejection.
+        void extractFromConversation(conversation.id, extractionDeps, { enabled: true, actor: "system:extractor" }).catch(
+          (err) => console.error("[extraction] auto-extract failed:", err instanceof Error ? err.message : err)
+        );
+      }
+    : undefined,
+});
+agentStoreRef = agents;
+
 const scheduler = createScheduler({
   store: agents,
   runAgent: (input) => agents.runAgent(input),
@@ -231,7 +341,8 @@ app.post("/api/admin/reindex", async (c) => {
   await reindexAllEntities(db, workspace);
   await reindexAllAgentAreas(db, workspace);
   await reindexAllSuggestions(db, workspace);
-  return c.json({ ok: true });
+  const embedded = await reindexEmbeddings(db, embeddings); // no-op when no provider
+  return c.json({ ok: true, embedded: embedded?.embedded ?? 0 });
 });
 
 // --- Suggest-changes --------------------------------------------------------
@@ -414,6 +525,24 @@ app.post("/api/conversations/:id/archive", async (c) => {
   return c.json({ conversation });
 });
 
+// Memory extraction from a finished conversation. Host execution → gated like the run
+// API: off by default + admin (ADMIN_PATTERNS) when auth is on, and — because auth is off
+// by default, where every request is the local admin — the same run-token second factor
+// applies in auth-off mode (set COMPANY_BRAIN_AGENT_RUN_TOKEN to require it).
+app.post("/api/conversations/:id/extract", async (c) => {
+  if (!memoryExtractionEnabled) {
+    return c.json({ error: "Memory extraction is disabled. Set COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION=1 to enable." }, 403);
+  }
+  if (!serverAuth.enabled && agentRunToken && c.req.header("authorization") !== `Bearer ${agentRunToken}`) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  const result = await extractFromConversation(c.req.param("id"), extractionDeps, {
+    enabled: true,
+    actor: committer(c),
+  });
+  return c.json({ extraction: result });
+});
+
 app.get("/api/providers", async (c) => {
   return c.json({ providers: await providers.detectAll() });
 });
@@ -443,13 +572,21 @@ app.post("/api/projects", async (c) => {
 });
 
 app.get("/api/recall", async (c) => {
-  const input = recallInput.parse({ q: c.req.query("q"), limit: c.req.query("limit"), mode: c.req.query("mode") });
-  return c.json(await memory.recall(input.q, input.limit, input.mode));
+  const input = recallInput.parse({
+    q: c.req.query("q"),
+    limit: c.req.query("limit"),
+    mode: c.req.query("mode"),
+    kind: c.req.query("kind"),
+    subject: c.req.query("subject")
+  });
+  const filters = input.kind || input.subject ? { kind: input.kind, subject: input.subject } : undefined;
+  return c.json(await memory.recall(input.q, input.limit, input.mode, filters));
 });
 
 app.post("/api/source-artifacts", async (c) => {
   const body = artifactInput.parse(await c.req.json());
   const artifact = await memory.ingestArtifact({ ...body, actor: committer(c, body.actor) });
+  refreshEmbeddings(); // DB-only ingest (no git commit) → refresh embeddings explicitly
   return c.json({ artifact }, 201);
 });
 

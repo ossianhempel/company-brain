@@ -207,7 +207,7 @@ type RecallResult = {
 
 type RecallResponse = {
   query: string;
-  searchMode: "bm25_local_v1" | "lexical_v1";
+  searchMode: "bm25_local_v1" | "lexical_v1" | "hybrid_rrf_v1";
   results: RecallResult[];
 };
 
@@ -498,6 +498,7 @@ export function App() {
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [recallQuery, setRecallQuery] = useState("");
   const [recall, setRecall] = useState<RecallResponse | null>(null);
+  const [recallMode, setRecallMode] = useState<"bm25_local_v1" | "lexical_v1" | "hybrid_rrf_v1">("bm25_local_v1");
   const [artifactTitle, setArtifactTitle] = useState("");
   const [artifactSourceType, setArtifactSourceType] = useState("manual");
   const [artifactText, setArtifactText] = useState("");
@@ -1053,14 +1054,14 @@ export function App() {
     await loadEntities();
   }
 
-  async function runRecall(searchQuery = recallQuery) {
+  async function runRecall(searchQuery = recallQuery, mode = recallMode) {
     const normalized = searchQuery.trim();
     if (!normalized) {
       setRecall(null);
       return;
     }
 
-    const params = new URLSearchParams({ q: normalized, limit: "12" });
+    const params = new URLSearchParams({ q: normalized, limit: "12", mode });
     const response = await fetch(`/api/recall?${params}`);
     setRecall((await response.json()) as RecallResponse);
   }
@@ -2004,7 +2005,21 @@ export function App() {
               <div className="titleStack">
                 <input className="titleInput" value="Memory" readOnly />
                 <div className="pageMeta">
-                  <span>recall search mode: {recall?.searchMode ?? "bm25_local_v1"}</span>
+                  <label>
+                    recall mode:{" "}
+                    <select
+                      value={recallMode}
+                      onChange={(event) => {
+                        const next = event.target.value as typeof recallMode;
+                        setRecallMode(next);
+                        if (recallQuery.trim()) void runRecall(recallQuery, next); // pass mode (state is async)
+                      }}
+                    >
+                      <option value="bm25_local_v1">BM25 (keyword)</option>
+                      <option value="lexical_v1">Lexical (term overlap)</option>
+                      <option value="hybrid_rrf_v1">Hybrid (BM25 + vectors; BM25 fallback if no embedder)</option>
+                    </select>
+                  </label>
                   <span>{memories.length} active memories</span>
                 </div>
               </div>

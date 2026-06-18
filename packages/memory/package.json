@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test --test-concurrency=1 src/entity-file.test.ts src/index.test.ts"
+    "test": "tsx --test --test-concurrency=1 src/entity-file.test.ts src/embedding.test.ts src/embedding-store.test.ts src/hybrid.test.ts src/extract.test.ts src/index.test.ts"
   },
   "dependencies": {
     "@company-brain/db": "workspace:*",

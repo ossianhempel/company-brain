@@ -54,7 +54,7 @@ type PageVersion = {
 
 type RecallResponse = {
   query: string;
-  searchMode: "bm25_local_v1" | "lexical_v1";
+  searchMode: "bm25_local_v1" | "lexical_v1" | "hybrid_rrf_v1";
   results: Array<{
     type: "memory" | "page_chunk" | "source_chunk";
     id: string;
@@ -282,9 +282,9 @@ server.registerTool(
       query: z.string().min(1).describe("Recall query."),
       limit: z.number().int().min(1).max(50).default(10).describe("Maximum results to return."),
       mode: z
-        .enum(["bm25_local_v1", "lexical_v1"])
+        .enum(["bm25_local_v1", "lexical_v1", "hybrid_rrf_v1"])
         .default("bm25_local_v1")
-        .describe("Recall mode. bm25_local_v1 is local keyword ranking. lexical_v1 is the older exact term-overlap mode.")
+        .describe("Recall mode. bm25_local_v1 is local keyword ranking. lexical_v1 is the older exact term-overlap mode. hybrid_rrf_v1 fuses BM25 with vector similarity (RRF) when an embedding provider is configured, else degrades to BM25.")
     },
     annotations: {
       readOnlyHint: true,
@@ -807,6 +807,28 @@ server.registerTool(
       await requestApi<{ conversation: unknown }>(`/api/conversations/${encodeURIComponent(id)}/archive`, {
         method: "POST",
         body: JSON.stringify({ actor: "mcp" })
+      })
+    );
+  }
+);
+
+server.registerTool(
+  "company_brain_extract_memories",
+  {
+    title: "Extract Memories from a Conversation",
+    description: "Extract durable memories from a finished conversation transcript into the memory store (entities + facts with citations). Host execution — off by default (requires COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION) and admin.",
+    inputSchema: { id: z.string().min(1).describe("Conversation id to extract from.") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ id }) => {
+    // Forward the host-execution run token in auth-off mode; with auth on, requestApi
+    // already sends the user's API_TOKEN bearer (don't clobber it with the run token).
+    const runToken = process.env.COMPANY_BRAIN_API_TOKEN ? undefined : process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+    return toolResult(
+      await requestApi<{ extraction: unknown }>(`/api/conversations/${encodeURIComponent(id)}/extract`, {
+        method: "POST",
+        headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
+        body: JSON.stringify({})
       })
     );
   }

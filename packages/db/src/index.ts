@@ -611,6 +611,38 @@ async function migrateDb(db: CompanyBrainDb) {
     create index if not exists suggestions_deleted_at_idx on suggestions (deleted_at);
   `);
 
+  // Phase 6: hybrid retrieval. chunk_embeddings is a DERIVED, rebuildable artifact
+  // (recomputed on reindex), keyed by STABLE identity — (chunk_type, owner_id,
+  // chunk_index, model) — not the ephemeral chunk row id (page_chunks/source_chunks
+  // get fresh randomUUID()s every reindex). The vector is stored as a portable JSON
+  // float array so this works on bare PGlite with no extension. The optional pgvector
+  // column + HNSW index are set up SEPARATELY (Postgres-only, autocommit, outside this
+  // transaction-wrapped migration) — never reference the `vector` type here.
+  await applyMigration(db, 15, `
+    create table if not exists chunk_embeddings (
+      chunk_type text not null,
+      owner_id text not null,
+      chunk_index int not null default 0,
+      model text not null,
+      dim int not null,
+      vector_json text not null,
+      content_hash text not null,
+      created_at timestamptz not null default now(),
+      primary key (chunk_type, owner_id, chunk_index, model)
+    );
+    create index if not exists chunk_embeddings_model_idx on chunk_embeddings (model);
+    create index if not exists chunk_embeddings_owner_idx on chunk_embeddings (chunk_type, owner_id);
+  `);
+
+  // Phase 6: drop the self-referential superseded_by FK. The link is derived/rebuildable
+  // from the entity-file `sup:` marker, so a hard FK adds only ordering fragility — it
+  // breaks any unordered row-at-a-time insert (the `migrate to postgres` copy, where a
+  // superseded row can be inserted before its replacement). The column stays; integrity
+  // is maintained by reindex from files, not the constraint.
+  await applyMigration(db, 16, `
+    alter table memories drop constraint if exists memories_superseded_by_memory_id_fkey;
+  `);
+
 }
 
 async function applyMigration(db: CompanyBrainDb, version: number, sql: string) {

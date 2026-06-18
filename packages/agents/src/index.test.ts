@@ -77,3 +77,31 @@ test("migration 14: users/sessions/role_grants + suggestions tables are usable",
     assert.equal(live.rows[0].id, "sg2");
   });
 });
+
+test("migration 15: chunk_embeddings is portable (no vector extension) + stable key", async () => {
+  await withDb(async (db) => {
+    await db.query(
+      "insert into chunk_embeddings (chunk_type, owner_id, chunk_index, model, dim, vector_json, content_hash) values ($1,$2,$3,$4,$5,$6,$7)",
+      ["page_chunk", "page-1", 0, "test-embed-v1", 3, JSON.stringify([0.1, 0.2, 0.3]), "h1"]
+    );
+    const row = await db.query<{ vector_json: string; dim: number }>(
+      "select vector_json, dim from chunk_embeddings where chunk_type=$1 and owner_id=$2 and chunk_index=$3 and model=$4",
+      ["page_chunk", "page-1", 0, "test-embed-v1"]
+    );
+    assert.equal(row.rows[0].dim, 3);
+    assert.deepEqual(JSON.parse(row.rows[0].vector_json), [0.1, 0.2, 0.3]);
+    // stable key: re-upsert on the same (type,owner,index,model) updates in place (no dup)
+    await db.query(
+      `insert into chunk_embeddings (chunk_type, owner_id, chunk_index, model, dim, vector_json, content_hash)
+       values ($1,$2,$3,$4,$5,$6,$7)
+       on conflict (chunk_type, owner_id, chunk_index, model) do update set vector_json = excluded.vector_json, content_hash = excluded.content_hash`,
+      ["page_chunk", "page-1", 0, "test-embed-v1", 3, JSON.stringify([0.4, 0.5, 0.6]), "h2"]
+    );
+    const after = await db.query<{ content_hash: string }>(
+      "select content_hash from chunk_embeddings where chunk_type=$1 and owner_id=$2 and chunk_index=$3 and model=$4",
+      ["page_chunk", "page-1", 0, "test-embed-v1"]
+    );
+    assert.equal(after.rows.length, 1);
+    assert.equal(after.rows[0].content_hash, "h2");
+  });
+});

@@ -9,15 +9,51 @@ import {
   appendFact,
   setFactStatus,
   type EntityDoc,
+  type FactSource,
 } from "./entity-file.ts";
+import { type EmbeddingRegistry } from "./embedding.ts";
+import { loadEmbeddings } from "./embedding-store.ts";
+import { rankVectorPool, reciprocalRankFusion } from "./hybrid.ts";
+export { createEmbeddingRegistry, cosineSimilarity, type EmbeddingProvider, type EmbeddingRegistry } from "./embedding.ts";
+export {
+  createApiEmbeddingProvider,
+  apiEmbeddingConfigFromEnv,
+  type ApiEmbeddingConfig,
+} from "./providers/api-embedding.ts";
+export {
+  gatherChunks,
+  embedChunks,
+  reindexEmbeddings,
+  loadEmbeddings,
+  setupPgVector,
+  type ChunkType,
+  type EmbeddableChunk,
+  type StoredEmbedding,
+} from "./embedding-store.ts";
+export {
+  extractFromConversation,
+  parseExtraction,
+  buildExtractionPrompt,
+  EXTRACTION_SYSTEM_PROMPT,
+  MAX_MEMORIES,
+  MAX_ENTITIES,
+  ExtractionParseError,
+  type Extraction,
+  type ExtractionDeps,
+  type ExtractionOptions,
+  type ExtractionResult,
+} from "./extract.ts";
 
 /** Options enabling file-canonical memory: writes go to entity files + git. */
 export interface MemoryStoreOptions {
   gitWriter?: GitWriter;
   workspace?: Workspace;
+  /** Optional embedding registry for the hybrid recall vector track (U2–U4). When
+   * absent or with no available provider, recall degrades to BM25-only. */
+  embeddings?: EmbeddingRegistry;
 }
 
-function slugifyMemory(text: string): string {
+export function slugifyMemory(text: string): string {
   return (
     text
       .toLowerCase()
@@ -119,7 +155,7 @@ export type RecallResponse = {
   results: RecallResult[];
 };
 
-export type RecallSearchMode = "lexical_v1" | "bm25_local_v1";
+export type RecallSearchMode = "lexical_v1" | "bm25_local_v1" | "hybrid_rrf_v1";
 
 type SourceArtifactRow = {
   id: string;
@@ -283,6 +319,11 @@ function chunkText(text: string, maxWords = 180) {
   }
 
   return chunks;
+}
+
+/** Normalize fact content for dedup matching — case + whitespace insensitive. */
+function normalizeContent(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function normalizeQuery(value: string) {
@@ -467,6 +508,9 @@ export async function reindexEntities(
     // Re-atomize the entity's facts into the derived memories index.
     await db.query("delete from memories where entity_id = $1", [doc.id]);
     for (const fact of doc.facts) {
+      // Insert with a null superseded_by first; the link is set in a second pass
+      // below, after all facts exist (the replacement fact may be inserted later in
+      // this same loop, so an inline FK reference could point at a not-yet-inserted row).
       await db.query(
         `
           insert into memories (id, kind, content, subject, status, confidence, created_by, entity_id)
@@ -508,6 +552,14 @@ export async function reindexEntities(
       }
     }
 
+    // Second pass: set superseded_by links now that every fact row exists (the
+    // replacement may have been inserted after the superseded fact in the loop above).
+    for (const fact of doc.facts) {
+      if (fact.supersededBy) {
+        await db.query("update memories set superseded_by_memory_id = $2 where id = $1", [fact.id, fact.supersededBy]);
+      }
+    }
+
     // Children are rebuilt — now mark the hash so future reindexes can skip.
     await db.query("update entities set content_hash = $2 where id = $1", [doc.id, hash]);
   }
@@ -529,6 +581,7 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
   const memoryDb = db ?? (await createDb());
   const gitWriter = opts?.gitWriter;
   const workspace = opts?.workspace;
+  const embeddings = opts?.embeddings;
   const fileMode = Boolean(gitWriter && workspace);
 
   // Reindex memory-area commits inside the git writer's serialized hook, so the
@@ -551,6 +604,115 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
       memoryId
     ]);
     return result.rows.map(toMemorySource);
+  }
+
+  const candidateKey = (c: RecallCandidate | RecallResult) => `${c.type}:${c.id}`;
+
+  /** Resolve vector hits (stable keys) back to recall candidates — these may lie
+   *  OUTSIDE the BM25 recency window, which is the point of the vector track. */
+  async function loadVectorCandidates(
+    pool: { chunkType: string; ownerId: string; chunkIndex: number }[],
+    terms: string[]
+  ): Promise<RecallCandidate[]> {
+    const out: RecallCandidate[] = [];
+    for (const hit of pool) {
+      if (hit.chunkType === "memory") {
+        const r = await memoryDb.query<MemoryRow>("select * from memories where id = $1 and status = 'active'", [hit.ownerId]);
+        const m = r.rows[0];
+        if (!m) continue;
+        out.push({
+          type: "memory", id: m.id, sourceId: m.id,
+          title: m.subject ? `${m.kind}: ${m.subject}` : m.kind,
+          snippet: snippet(m.content, terms), score: 0,
+          citation: { label: `memory:${m.id}` },
+          metadata: { kind: m.kind, subject: m.subject, confidence: m.confidence, createdBy: m.created_by, createdAt: normalizeTimestamp(m.created_at), sources: await sourcesForMemory(m.id) },
+          searchText: `${m.kind} ${m.subject ?? ""} ${m.content}`, lexicalBoost: 5,
+        });
+      } else if (hit.chunkType === "page_chunk") {
+        const r = await memoryDb.query<{ chunk_id: string; page_id: string; page_slug: string; page_title: string; heading_path: string; text: string; updated_at: string | Date }>(
+          `select page_chunks.id as chunk_id, pages.id as page_id, pages.slug as page_slug, pages.title as page_title,
+                  page_chunks.heading_path, page_chunks.text, pages.updated_at
+             from page_chunks join pages on pages.id = page_chunks.page_id
+            where page_chunks.page_id = $1 and page_chunks.chunk_index = $2 and pages.deleted_at is null`,
+          [hit.ownerId, hit.chunkIndex]
+        );
+        const c = r.rows[0];
+        if (!c) continue;
+        out.push({
+          type: "page_chunk", id: c.chunk_id, sourceId: c.page_id,
+          title: c.heading_path || c.page_title, snippet: snippet(c.text, terms), score: 0,
+          citation: { label: `/${c.page_slug}${c.heading_path ? `#${c.heading_path}` : ""}`, pageId: c.page_id, pageSlug: c.page_slug, pageChunkId: c.chunk_id },
+          metadata: { updatedAt: normalizeTimestamp(c.updated_at) },
+          searchText: `${c.page_title} ${c.page_slug} ${c.heading_path} ${c.text}`, lexicalBoost: 2,
+        });
+      } else {
+        const r = await memoryDb.query<{ chunk_id: string; artifact_id: string; artifact_title: string; source_type: string; text: string; created_at: string | Date }>(
+          `select source_chunks.id as chunk_id, source_artifacts.id as artifact_id, source_artifacts.title as artifact_title,
+                  source_artifacts.source_type, source_chunks.text, source_artifacts.created_at
+             from source_chunks join source_artifacts on source_artifacts.id = source_chunks.artifact_id
+            where source_chunks.artifact_id = $1 and source_chunks.chunk_index = $2 and source_artifacts.deleted_at is null`,
+          [hit.ownerId, hit.chunkIndex]
+        );
+        const c = r.rows[0];
+        if (!c) continue;
+        out.push({
+          type: "source_chunk", id: c.chunk_id, sourceId: c.artifact_id,
+          title: c.artifact_title, snippet: snippet(c.text, terms), score: 0,
+          citation: { label: `${c.source_type}:${c.artifact_title}`, artifactId: c.artifact_id, sourceChunkId: c.chunk_id },
+          metadata: { sourceType: c.source_type, createdAt: normalizeTimestamp(c.created_at) },
+          searchText: `${c.artifact_title} ${c.source_type} ${c.text}`, lexicalBoost: 1,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Hybrid: fuse BM25 over (BM25 candidates ∪ vector top-N) with the vector ranking
+   *  via RRF. No embedding provider / no query vector → degrades to BM25-only. */
+  async function rankHybrid(
+    bm25Candidates: RecallCandidate[],
+    terms: string[],
+    query: string,
+    limit: number,
+    matchesFilter: (c: RecallCandidate) => boolean = () => true
+  ): Promise<RecallResult[]> {
+    const provider = embeddings ? await embeddings.active() : null;
+    let queryVector: number[] | null = null;
+    if (provider) {
+      try {
+        queryVector = (await provider.embed([query]))[0] ?? null;
+      } catch {
+        queryVector = null;
+      }
+    }
+    if (!provider || !queryVector) {
+      return rankWithBm25(bm25Candidates, terms, limit); // structural degradation to BM25
+    }
+    const pool = await loadEmbeddings(memoryDb, provider.model);
+    const vectorHits = rankVectorPool(queryVector, pool);
+    const vectorCandidates = (await loadVectorCandidates(vectorHits, terms)).filter(matchesFilter);
+
+    // Union (dedup by type:id) so vector-only hits outside the recency window are reachable.
+    const union = [...bm25Candidates];
+    const seen = new Set(bm25Candidates.map(candidateKey));
+    for (const vc of vectorCandidates) {
+      if (!seen.has(candidateKey(vc))) {
+        seen.add(candidateKey(vc));
+        union.push(vc);
+      }
+    }
+    const bm25List = rankWithBm25(union, terms, union.length); // full ranking (rank = index)
+    const fused = reciprocalRankFusion<RecallResult | RecallCandidate>([bm25List, vectorCandidates], candidateKey);
+    const byKey = new Map(union.map((c) => [candidateKey(c), c]));
+    return [...fused.entries()]
+      .map(([key, score]) => ({ candidate: byKey.get(key)!, score }))
+      .filter((x) => x.candidate)
+      .sort((a, b) => b.score - a.score || a.candidate.title.localeCompare(b.candidate.title))
+      .slice(0, limit)
+      .map(({ candidate, score }) => {
+        const { searchText: _s, lexicalBoost: _l, ...result } = candidate;
+        return { ...result, score: Number(score.toFixed(6)) }; // expose the fused RRF score
+      });
   }
 
   async function writeMemorySources(memoryId: string, sources: Array<Omit<MemorySource, "id" | "memoryId">>) {
@@ -765,6 +927,59 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
       return row ? { ...toMemory(row), sources: await sourcesForMemory(row.id) } : null;
     },
 
+    /** Supersede an existing memory: mark it `superseded` (linked to the replacement)
+     *  and append the new fact in ONE queued entity-file mutation. Rebuildable: the
+     *  link round-trips via the fact `sup:` marker → memories.superseded_by_memory_id. */
+    async supersedeMemory(
+      oldId: string,
+      input: { kind: MemoryKind; content: string; confidence?: number; sources?: FactSource[] },
+      actor = "local-user"
+    ): Promise<MemoryWithSources | null> {
+      if (!fileMode) throw new Error("supersedeMemory requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      const owner = await memoryDb.query<{ entity_id: string | null }>("select entity_id from memories where id = $1", [oldId]);
+      const entityId = owner.rows[0]?.entity_id;
+      if (!entityId) return null;
+      const ent = await memoryDb.query<{ slug: string }>("select slug from entities where id = $1", [entityId]);
+      const slug = ent.rows[0]?.slug;
+      if (!slug) return null;
+      const fact = newFact({
+        kind: input.kind,
+        content: input.content,
+        date: new Date().toISOString().slice(0, 10),
+        confidence: input.confidence,
+        sources: input.sources,
+      });
+      await gitWriter!.enqueue({
+        paths: [ws.entityFilePath(slug)],
+        message: `memory: supersede ${oldId} -> ${fact.id}`,
+        actor: { name: actor },
+        write: async () => {
+          const cur = await ws.readEntity(slug);
+          if (!cur) return;
+          let doc = parseEntity(cur);
+          doc = setFactStatus(doc, oldId, "superseded", fact.id);
+          doc = appendFact(doc, fact);
+          const file = buildEntityFile(doc);
+          await ws.writeEntity(slug, { frontmatter: file.frontmatter, markdown: file.markdown }, new Date().toISOString());
+        },
+      });
+      return loadMemory(fact.id);
+    },
+
+    /** Find an active fact in an entity by (kind, normalized content) — the dedup
+     *  probe extraction uses to choose save-new vs supersede vs skip. */
+    async findExistingFact(entitySlug: string, kind: MemoryKind, content: string): Promise<MemoryWithSources | null> {
+      if (!fileMode) return null;
+      const cur = await workspace!.readEntity(entitySlug);
+      if (!cur) return null;
+      const norm = normalizeContent(content);
+      const match = parseEntity(cur).facts.find(
+        (f) => f.status === "active" && f.kind === kind && normalizeContent(f.content) === norm
+      );
+      return match ? loadMemory(match.id) : null;
+    },
+
     async getMemory(id: string): Promise<MemoryWithSources | null> {
       const result = await memoryDb.query<MemoryRow>("select * from memories where id = $1", [id]);
       const row = result.rows[0];
@@ -784,12 +999,25 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
       return Promise.all(result.rows.map(async (row) => ({ ...toMemory(row), sources: await sourcesForMemory(row.id) })));
     },
 
-    async recall(query: string, limit = 10, mode: RecallSearchMode = "bm25_local_v1"): Promise<RecallResponse> {
+    async recall(
+      query: string,
+      limit = 10,
+      mode: RecallSearchMode = "bm25_local_v1",
+      filters?: { kind?: string; subject?: string }
+    ): Promise<RecallResponse> {
       const terms = normalizeQuery(query);
       const safeLimit = Math.min(Math.max(limit, 1), 50);
       if (terms.length === 0) {
         return { query, searchMode: mode, results: [] };
       }
+      // Structured filters constrain to matching memory candidates (kind/subject).
+      // `status` is intentionally not a filter — recall is active-only by design.
+      const hasFilter = Boolean(filters?.kind || filters?.subject);
+      const matchesFilter = (c: RecallCandidate): boolean =>
+        !hasFilter ||
+        (c.type === "memory" &&
+          (!filters?.kind || c.metadata.kind === filters.kind) &&
+          (!filters?.subject || c.metadata.subject === filters.subject));
 
       const memories = await memoryDb.query<MemoryRow>(
         "select * from memories where status = 'active' order by updated_at desc limit 500"
@@ -919,14 +1147,15 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
         })
       ];
 
-      return {
-        query,
-        searchMode: mode,
-        results:
-          mode === "lexical_v1"
-            ? rankWithLexical(candidates, terms, safeLimit)
-            : rankWithBm25(candidates, terms, safeLimit)
-      };
+      const filtered = hasFilter ? candidates.filter(matchesFilter) : candidates;
+      if (mode === "lexical_v1") {
+        return { query, searchMode: mode, results: rankWithLexical(filtered, terms, safeLimit) };
+      }
+      if (mode === "hybrid_rrf_v1") {
+        const results = await rankHybrid(filtered, terms, query, safeLimit, matchesFilter);
+        return { query, searchMode: mode, results };
+      }
+      return { query, searchMode: mode, results: rankWithBm25(filtered, terms, safeLimit) };
     },
 
     async listEntities(input?: { type?: string }): Promise<Entity[]> {

@@ -493,3 +493,49 @@ test("a moved entity file (same body, new slug) is reindexed, not tombstoned", a
     assert.equal(Number(mems.rows[0].n), 1); // memories survived the move
   });
 });
+
+test("supersedeMemory marks the old fact superseded (link round-trips) and dedup finds the new one", async () => {
+  await withFileMemoryStore(async (memory, db) => {
+    const m1 = await memory.saveMemory({ kind: "preference", subject: "ada", content: "prefers tabs", actor: "u" });
+    const m2 = await memory.supersedeMemory(m1!.id, { kind: "preference", content: "prefers spaces" }, "u");
+    assert.ok(m2);
+    assert.notEqual(m2!.id, m1!.id);
+
+    // old fact is superseded with the link; new fact is active — and it round-trips
+    // through the file (these rows are produced by the commit-hook reindex).
+    const old = await db.query<{ status: string; superseded_by_memory_id: string | null }>(
+      "select status, superseded_by_memory_id from memories where id = $1",
+      [m1!.id]
+    );
+    assert.equal(old.rows[0].status, "superseded");
+    assert.equal(old.rows[0].superseded_by_memory_id, m2!.id);
+
+    const active = await memory.listMemories({ status: "active" });
+    assert.equal(active.some((m) => m.id === m1!.id), false);
+    assert.equal(active.some((m) => m.id === m2!.id), true);
+
+    // dedup probe is case/whitespace-insensitive and finds the active replacement
+    const found = await memory.findExistingFact("ada", "preference", "  Prefers   Spaces ");
+    assert.equal(found?.id, m2!.id);
+    // a never-recorded fact is not found
+    assert.equal(await memory.findExistingFact("ada", "preference", "prefers nothing"), null);
+  });
+});
+
+test("supersede link survives a full reindex (rebuildable from the file)", async () => {
+  await withFileMemoryStore(async (memory, db, ws) => {
+    const m1 = await memory.saveMemory({ kind: "fact", subject: "bob", content: "uses vim", actor: "u" });
+    const m2 = await memory.supersedeMemory(m1!.id, { kind: "fact", content: "uses neovim" }, "u");
+    // wipe the derived rows + the content-hash skip marker, then rebuild from the file alone
+    await db.query("delete from memories");
+    await db.query("update entities set content_hash = null");
+    const { reindexAllEntities } = await import("./index.ts");
+    await reindexAllEntities(db, ws);
+    const old = await db.query<{ status: string; superseded_by_memory_id: string | null }>(
+      "select status, superseded_by_memory_id from memories where id = $1",
+      [m1!.id]
+    );
+    assert.equal(old.rows[0].status, "superseded");
+    assert.equal(old.rows[0].superseded_by_memory_id, m2!.id); // link rebuilt from sup: marker
+  });
+});

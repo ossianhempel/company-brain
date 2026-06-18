@@ -88,4 +88,6 @@ test("routeRequirement: reads viewer, writes editor, host-exec/admin admin, auth
   // proposing a suggestion is viewer-open; approving it is a normal editor write
   assert.deepEqual(routeRequirement("POST", "/api/pages/p1/suggestions"), { kind: "role", role: "viewer" });
   assert.deepEqual(routeRequirement("POST", "/api/suggestions/sg1/approve"), { kind: "role", role: "editor" });
+  // memory extraction is host execution → admin
+  assert.deepEqual(routeRequirement("POST", "/api/conversations/c1/extract"), { kind: "role", role: "admin" });
 });

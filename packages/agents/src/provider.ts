@@ -191,3 +191,14 @@ export function createProviderRegistry(): ProviderRegistry {
     },
   };
 }
+
+/** Run a one-off prompt through the first available provider (used by memory
+ *  extraction). Returns a failed result when no provider is available — never throws. */
+export async function runPrompt(registry: ProviderRegistry, input: RunInput): Promise<RunResult> {
+  const detected = await registry.detectAll();
+  const available = detected.find((d) => d.detection.available);
+  if (!available) return { status: "failed", turns: [], error: "no agent provider available" };
+  const provider = registry.get(available.id);
+  if (!provider) return { status: "failed", turns: [], error: "provider missing" };
+  return provider.run(input);
+}

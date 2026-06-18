@@ -813,6 +813,24 @@ server.registerTool(
 );
 
 server.registerTool(
+  "company_brain_extract_memories",
+  {
+    title: "Extract Memories from a Conversation",
+    description: "Extract durable memories from a finished conversation transcript into the memory store (entities + facts with citations). Host execution — off by default (requires COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION) and admin.",
+    inputSchema: { id: z.string().min(1).describe("Conversation id to extract from.") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ id }) => {
+    return toolResult(
+      await requestApi<{ extraction: unknown }>(`/api/conversations/${encodeURIComponent(id)}/extract`, {
+        method: "POST",
+        body: JSON.stringify({})
+      })
+    );
+  }
+);
+
+server.registerTool(
   "company_brain_list_suggestions",
   {
     title: "List Suggestions",

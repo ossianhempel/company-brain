@@ -71,7 +71,12 @@ export const SESSION_COOKIE = "cb_session";
 /** The access requirement for a route. `public` → no role check (any/no principal). */
 export type RouteRequirement = { kind: "public" } | { kind: "role"; role: Role };
 
-const ADMIN_PATTERNS = [/^\/api\/admin\//, /^\/api\/agents\/[^/]+\/run$/];
+const ADMIN_PATTERNS = [
+  /^\/api\/admin\//,
+  /^\/api\/agents\/[^/]+\/run$/,
+  // memory extraction spawns a host LLM (same threat class as agent run) → admin.
+  /^\/api\/conversations\/[^/]+\/extract$/,
+];
 
 /**
  * RBAC policy by method + path. Reads require viewer, writes editor, and

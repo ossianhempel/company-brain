@@ -53,7 +53,7 @@ export interface MemoryStoreOptions {
   embeddings?: EmbeddingRegistry;
 }
 
-function slugifyMemory(text: string): string {
+export function slugifyMemory(text: string): string {
   return (
     text
       .toLowerCase()

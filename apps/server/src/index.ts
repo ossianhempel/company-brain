@@ -15,6 +15,9 @@ import {
   apiEmbeddingConfigFromEnv,
   reindexEmbeddings,
   setupPgVector,
+  extractFromConversation,
+  slugifyMemory,
+  type ExtractionDeps,
 } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 import { createSuggestionStore, reindexAllSuggestions, suggestionsCommitHook } from "@company-brain/suggestions";
@@ -25,6 +28,7 @@ import {
   reindexAllAgentAreas,
   claudeLocalProvider,
   codexLocalProvider,
+  runPrompt,
 } from "@company-brain/agents";
 
 const pageInput = z.object({
@@ -136,7 +140,63 @@ const suggestions = await createSuggestionStore(db, { gitWriter, workspace, page
 const providers = createProviderRegistry();
 providers.register(claudeLocalProvider());
 providers.register(codexLocalProvider());
-const agents = await createAgentStore(db, { gitWriter, workspace, providers });
+// Memory extraction (host execution) — OFF BY DEFAULT, mirrors the scheduler/run-API
+// gating. The deps bridge the agent runtime (provider + transcript) to the memory store.
+// A forward ref breaks the deps↔store cycle: deps.getTranscript reads the store lazily,
+// the store's auto-extract hook reads deps — both only at call time.
+const memoryExtractionEnabled = process.env.COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION === "1";
+let agentStoreRef: Awaited<ReturnType<typeof createAgentStore>> | null = null;
+const extractionDeps: ExtractionDeps = {
+  runProvider: async (systemPrompt, prompt) => {
+    const result = await runPrompt(providers, { systemPrompt, prompt });
+    if (result.status !== "done") throw new Error(result.error ?? "extraction provider failed");
+    return result.turns.map((t) => t.content).join("\n");
+  },
+  getTranscript: async (conversationId) => {
+    const conv = await agentStoreRef!.getConversation(conversationId);
+    return conv ? conv.turns.map((t) => ({ role: t.role, content: t.content })) : null;
+  },
+  ingestTranscript: async (conversationId, text) => {
+    const artifact = await memory.ingestArtifact({
+      sourceType: "conversation",
+      title: `conversation ${conversationId}`,
+      rawText: text,
+      actor: "extractor",
+    });
+    return artifact.id;
+  },
+  saveMemory: async (input) => {
+    const saved = await memory.saveMemory({
+      kind: input.kind,
+      subject: input.subject,
+      content: input.content,
+      confidence: input.confidence,
+      actor: input.actor,
+      sources: [{ sourceType: "artifact", artifactId: input.artifactId, pageId: null, pageChunkId: null, sourceChunkId: null, quote: input.quote }],
+    });
+    return saved?.id ?? null;
+  },
+  supersedeMemory: async (oldId, input, actor) => {
+    const saved = await memory.supersedeMemory(oldId, input, actor);
+    return saved?.id ?? null;
+  },
+  findExistingFact: (entitySlug, kind, content) => memory.findExistingFact(entitySlug, kind, content),
+  entitySlug: slugifyMemory,
+};
+const agents = await createAgentStore(db, {
+  gitWriter,
+  workspace,
+  providers,
+  // Auto-extract after a successful run — only when enabled; attributed to the system
+  // identity (so a prompt-submitting editor can't write memories they couldn't directly).
+  onConversationComplete: memoryExtractionEnabled
+    ? (conversation) => {
+        void extractFromConversation(conversation.id, extractionDeps, { enabled: true, actor: "system:extractor" });
+      }
+    : undefined,
+});
+agentStoreRef = agents;
+
 const scheduler = createScheduler({
   store: agents,
   runAgent: (input) => agents.runAgent(input),
@@ -430,6 +490,19 @@ app.post("/api/conversations/:id/archive", async (c) => {
   const conversation = await agents.archiveConversation(c.req.param("id"), committer(c, body.actor));
   if (!conversation) return c.json({ error: "Conversation not found" }, 404);
   return c.json({ conversation });
+});
+
+// Memory extraction from a finished conversation. Admin-gated (ADMIN_PATTERNS) +
+// off by default; attributes extracted memories to the authenticated principal.
+app.post("/api/conversations/:id/extract", async (c) => {
+  if (!memoryExtractionEnabled) {
+    return c.json({ error: "Memory extraction is disabled. Set COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION=1 to enable." }, 403);
+  }
+  const result = await extractFromConversation(c.req.param("id"), extractionDeps, {
+    enabled: true,
+    actor: committer(c),
+  });
+  return c.json({ extraction: result });
 });
 
 app.get("/api/providers", async (c) => {

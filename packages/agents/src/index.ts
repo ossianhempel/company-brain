@@ -205,6 +205,10 @@ export interface AgentStoreOptions {
   workspace?: Workspace;
   /** Provider registry for runAgent; required to execute runs. */
   providers?: ProviderRegistry;
+  /** Optional post-completion hook (e.g. memory extraction). Fired best-effort
+   *  AFTER the transcript is persisted — never inside the writer mutex — only for
+   *  successfully-completed (`done`) runs. Errors are swallowed (best-effort). */
+  onConversationComplete?: (conversation: Conversation) => void | Promise<void>;
 }
 
 export interface Agent {
@@ -596,7 +600,17 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         error: result.error,
         turns: [{ role: "user", content: input.prompt }, ...result.turns],
       };
-      return this.saveConversation(doc, input.actor ?? input.agentSlug);
+      const conversation = await this.saveConversation(doc, input.actor ?? input.agentSlug);
+      // Fire the post-completion hook best-effort, AFTER persistence (not in the writer
+      // mutex), only for successful runs. A hook failure must not fail the run.
+      if (conversation && conversation.status === "done" && opts?.onConversationComplete) {
+        try {
+          await opts.onConversationComplete(conversation);
+        } catch (err) {
+          console.error("[agents] onConversationComplete hook failed:", err instanceof Error ? err.message : err);
+        }
+      }
+      return conversation;
     },
   };
 }

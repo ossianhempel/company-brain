@@ -1253,6 +1253,19 @@ async function handleMemoryCommand(subcommand: string | undefined, rest: string[
     return;
   }
 
+  if (subcommand === "extract") {
+    // Host execution (spawns an LLM) → server-mediated only; off by default + admin.
+    const conversationId = positionals[0];
+    if (!conversationId) throw new Error("memory extract requires <conversation-id>");
+    if (!useApi) throw new Error("memory extract requires the server (host execution; no --direct path).");
+    const data = await requestApi<{ extraction: unknown }>(`/api/conversations/${encodeURIComponent(conversationId)}/extract`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    printJson(data);
+    return;
+  }
+
   if (subcommand === "entities") {
     const type = flagString(flags, "type");
     const entities = useApi

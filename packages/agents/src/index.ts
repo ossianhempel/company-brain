@@ -484,6 +484,10 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
           },
         });
       }
+      // Reconcile the derived row from the canonical file. Repairs a stale index
+      // if a prior archive's reindex hook failed (file archived, row still done/failed)
+      // — a retry now fixes it. Idempotent when the row already matches (hash skip).
+      await reindexConversations(agentDb, workspace!, [id]);
       const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1", [id]);
       if (result.rows[0]) return toConversation(result.rows[0]);
       // The file exists (read above) but the derived row is missing/stale — derive

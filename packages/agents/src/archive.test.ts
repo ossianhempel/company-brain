@@ -73,3 +73,17 @@ test("archive returns a file-derived conversation when the index row is missing"
     assert.equal(archived.status, "archived");
   });
 });
+
+test("archive reconciles a stale index row left by a failed prior reindex", async () => {
+  await withStore(async (store, db) => {
+    await store.saveConversation(doneConv("c4"));
+    await store.archiveConversation("c4"); // file + row archived
+    // Simulate a failed archive reindex hook: file is archived, but the row is
+    // still 'done' with a stale content_hash (so reconcile won't hash-skip).
+    await db.query("update conversations set status = 'done', content_hash = 'stale' where id = $1", ["c4"]);
+    const repaired = await store.archiveConversation("c4"); // retry reconciles
+    assert.equal(repaired?.status, "archived");
+    const row = await db.query<{ status: string }>("select status from conversations where id = $1", ["c4"]);
+    assert.equal(row.rows[0].status, "archived");
+  });
+});

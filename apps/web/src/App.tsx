@@ -24,6 +24,7 @@ type Page = {
 };
 
 type PageDetail = Page & {
+  version?: string | null;
   backlinks: Page[];
   relatedPages: Page[];
   comments: PageComment[];
@@ -1270,11 +1271,21 @@ export function App() {
   async function persistPage(id: string, nextTitle: string, nextHtml: string) {
     setSaveState("saving");
 
+    // Send the per-file version we last saw so a concurrent edit conflicts (409)
+    // instead of silently overwriting.
+    const baseVersion = pageDetail?.id === id ? pageDetail.version ?? undefined : undefined;
     const response = await fetch(`/api/pages/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: nextTitle, html: nextHtml, actor: "web" })
+      body: JSON.stringify({ title: nextTitle, html: nextHtml, actor: "web", baseVersion })
     });
+    if (!response.ok) {
+      // 409 = someone else changed this page. Reload the latest + flag the conflict
+      // (a full merge UI is deferred); the user re-applies their edit on fresh content.
+      setSaveState("error");
+      if (response.status === 409) await loadPageDetail(id);
+      return null;
+    }
     const data = (await response.json()) as { page: Page };
     setPages((current) => orderPages(current.map((page) => (page.id === data.page.id ? data.page : page))));
     await loadPageDetail(data.page.id);

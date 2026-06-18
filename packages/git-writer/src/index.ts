@@ -47,13 +47,20 @@ export interface WorkspaceMutation {
   /** Performs the file writes/deletes for the declared paths. */
   write: () => Promise<void> | void;
   /**
-   * Optimistic-concurrency guard: the commit hash the caller last saw, compared
-   * against the workspace HEAD (repo-global, not per-page). Page mutations do
-   * NOT pass this yet — per-page conflict tokens + the merge UI are Phase 5
-   * (multi-user hardening); wiring repo-HEAD here would fire false conflicts on
-   * edits to unrelated pages. (U3)
+   * Repo-global optimistic-concurrency guard (the commit hash the caller last saw,
+   * compared against workspace HEAD). Retained for back-compat; prefer
+   * `expectedPathVersion` for per-file checks — repo-HEAD fires false conflicts on
+   * edits to unrelated files.
    */
   baseVersion?: string;
+  /**
+   * Per-file optimistic-concurrency guard (Phase 5): the last-commit oid the caller
+   * last saw for a specific path. Checked inside the writer mutex before `write()`;
+   * if that path's current last-commit oid differs, the write is stale → conflict.
+   * Unlike `baseVersion` this only conflicts on changes to *that* file, so concurrent
+   * edits to unrelated files don't collide. `oid: null` means "expected absent" (new file).
+   */
+  expectedPathVersion?: { path: string; oid: string | null };
 }
 
 export interface MutationResult {
@@ -245,6 +252,17 @@ export function createGitWriter(options: GitWriterOptions) {
     }));
   }
 
+  /** The oid of the most recent commit that touched a path, or null if none. */
+  async function lastCommitOid(relPath: string): Promise<string | null> {
+    await ensureRepo();
+    try {
+      const commits = await git.log({ fs, dir, filepath: relPath, depth: 1, force: true });
+      return commits[0]?.oid ?? null;
+    } catch {
+      return null; // path never committed
+    }
+  }
+
   async function readBlobAt(oid: string, relPath: string): Promise<string | null> {
     try {
       const { blob } = await git.readBlob({ fs, dir, oid, filepath: relPath });
@@ -328,6 +346,17 @@ export function createGitWriter(options: GitWriterOptions) {
       throw new WorkspaceConflictError(mutation.baseVersion, priorHead ?? "");
     }
 
+    // Per-file optimistic-concurrency check — inside the mutex, before write(), so a
+    // racing commit between the caller's read and this enqueue is caught atomically.
+    // Only conflicts on changes to the specific path (no false cross-file conflicts).
+    if (mutation.expectedPathVersion !== undefined) {
+      const { path, oid } = mutation.expectedPathVersion;
+      const currentOid = await lastCommitOid(path);
+      if (currentOid !== oid) {
+        throw new WorkspaceConflictError(oid ?? "", currentOid ?? "");
+      }
+    }
+
     let hash: string;
     let changed: boolean;
     try {
@@ -382,6 +411,7 @@ export function createGitWriter(options: GitWriterOptions) {
     setOnCommit,
     addCommitHook,
     history,
+    lastCommitOid,
     diff,
     commitMeta,
     restore,

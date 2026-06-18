@@ -439,7 +439,9 @@ app.post("/api/pages", async (c) => {
 });
 
 app.put("/api/pages/:id", async (c) => {
-  const body = pageInput.partial().parse(await c.req.json());
+  // baseVersion = the page's last-commit oid the client last saw; a stale token
+  // surfaces as a 409 (WorkspaceConflictError → onError) instead of a silent overwrite.
+  const body = pageInput.partial().extend({ baseVersion: z.string().nullish() }).parse(await c.req.json());
   const page = await pages.update(c.req.param("id"), body);
   if (!page) {
     return c.json({ error: "Page not found" }, 404);

@@ -365,3 +365,90 @@ test("KTD1 spike: nested-path init/commit/log/diff/restore cycle", async () => {
     assert.equal(await writer.restore(h1, rel), "# Runbook\nstep 1\n");
   });
 });
+
+// --- Phase 5: per-file optimistic concurrency -------------------------------
+
+async function commitFile(writer: ReturnType<typeof createGitWriter>, dir: string, rel: string, body: string) {
+  return writer.enqueue({
+    paths: [rel],
+    message: `write ${rel}`,
+    actor,
+    write: async () => {
+      await writeFile(join(dir, rel), body);
+    }
+  });
+}
+
+test("expectedPathVersion: stale per-file version conflicts, current succeeds", async () => {
+  await withWriter(async (writer, dir) => {
+    await commitFile(writer, dir, "p.md", "v1\n");
+    const v1 = await writer.lastCommitOid("p.md");
+
+    // a stale token (pretending we never saw v1) conflicts
+    await assert.rejects(
+      () =>
+        writer.enqueue({
+          paths: ["p.md"],
+          message: "stale",
+          actor,
+          expectedPathVersion: { path: "p.md", oid: null },
+          write: async () => writeFile(join(dir, "p.md"), "x\n")
+        }),
+      WorkspaceConflictError
+    );
+
+    // the current token succeeds
+    await writer.enqueue({
+      paths: ["p.md"],
+      message: "ok",
+      actor,
+      expectedPathVersion: { path: "p.md", oid: v1 },
+      write: async () => writeFile(join(dir, "p.md"), "v2\n")
+    });
+    const v2 = await writer.lastCommitOid("p.md");
+    assert.notEqual(v1, v2);
+  });
+});
+
+test("expectedPathVersion does NOT false-conflict on edits to other files", async () => {
+  await withWriter(async (writer, dir) => {
+    await commitFile(writer, dir, "a.md", "a1\n");
+    const aVer = await writer.lastCommitOid("a.md");
+    // commit an unrelated file b.md (advances repo HEAD)
+    await commitFile(writer, dir, "b.md", "b1\n");
+    // editing a.md with a.md's still-current token must still succeed
+    await writer.enqueue({
+      paths: ["a.md"],
+      message: "edit a",
+      actor,
+      expectedPathVersion: { path: "a.md", oid: aVer },
+      write: async () => writeFile(join(dir, "a.md"), "a2\n")
+    });
+    assert.equal(existsSync(join(dir, "a.md")), true);
+  });
+});
+
+test("expectedPathVersion oid:null allows a brand-new file but conflicts if it exists", async () => {
+  await withWriter(async (writer, dir) => {
+    // new file: expected absent -> succeeds
+    await writer.enqueue({
+      paths: ["new.md"],
+      message: "create",
+      actor,
+      expectedPathVersion: { path: "new.md", oid: null },
+      write: async () => writeFile(join(dir, "new.md"), "n\n")
+    });
+    // now it exists: expected-absent conflicts
+    await assert.rejects(
+      () =>
+        writer.enqueue({
+          paths: ["new.md"],
+          message: "create again",
+          actor,
+          expectedPathVersion: { path: "new.md", oid: null },
+          write: async () => writeFile(join(dir, "new.md"), "n2\n")
+        }),
+      WorkspaceConflictError
+    );
+  });
+});

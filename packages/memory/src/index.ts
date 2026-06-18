@@ -10,11 +10,21 @@ import {
   setFactStatus,
   type EntityDoc,
 } from "./entity-file.ts";
+import { type EmbeddingRegistry } from "./embedding.ts";
+export { createEmbeddingRegistry, cosineSimilarity, type EmbeddingProvider, type EmbeddingRegistry } from "./embedding.ts";
+export {
+  createApiEmbeddingProvider,
+  apiEmbeddingConfigFromEnv,
+  type ApiEmbeddingConfig,
+} from "./providers/api-embedding.ts";
 
 /** Options enabling file-canonical memory: writes go to entity files + git. */
 export interface MemoryStoreOptions {
   gitWriter?: GitWriter;
   workspace?: Workspace;
+  /** Optional embedding registry for the hybrid recall vector track (U2–U4). When
+   * absent or with no available provider, recall degrades to BM25-only. */
+  embeddings?: EmbeddingRegistry;
 }
 
 function slugifyMemory(text: string): string {

@@ -395,8 +395,8 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
           // NOTE: for a new agent `id` is absent here, but writeFileIn's ensureId
           // generates + persists a stable id before writing (and readFileIn backfills
           // on read), so the file's id is stable across reindex — no churn.
-          const base = cur?.frontmatter ?? ({ id: undefined, title: slug } as Record<string, unknown>);
-          const frontmatter: Record<string, unknown> = { ...base };
+          const base: Partial<PageFrontmatter> = cur?.frontmatter ?? { title: slug };
+          const frontmatter: Partial<PageFrontmatter> = { ...base };
           if (patch?.name !== undefined) frontmatter.title = patch.name;
           if (patch?.provider !== undefined) frontmatter.provider = patch.provider;
           if (patch?.model !== undefined) frontmatter.model = patch.model;

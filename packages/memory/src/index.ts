@@ -709,9 +709,9 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
       .filter((x) => x.candidate)
       .sort((a, b) => b.score - a.score || a.candidate.title.localeCompare(b.candidate.title))
       .slice(0, limit)
-      .map(({ candidate }) => {
+      .map(({ candidate, score }) => {
         const { searchText: _s, lexicalBoost: _l, ...result } = candidate;
-        return { ...result, score: 0 };
+        return { ...result, score: Number(score.toFixed(6)) }; // expose the fused RRF score
       });
   }
 

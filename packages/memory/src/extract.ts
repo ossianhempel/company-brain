@@ -42,9 +42,15 @@ export interface Extraction {
 
 export class ExtractionParseError extends Error {}
 
+/** Neutralize any literal <transcript>/</transcript> tags in untrusted content so a
+ *  turn can't forge or close the delimiter boundary (prompt-injection break-out). */
+function neutralizeDelimiter(text: string): string {
+  return text.replace(/<\s*\/?\s*transcript\s*>/gi, "[transcript]");
+}
+
 /** Wrap the transcript in the data delimiter (injection boundary). */
 export function buildExtractionPrompt(turns: { role: string; content: string }[]): string {
-  const body = turns.map((t) => `${t.role}: ${t.content}`).join("\n");
+  const body = turns.map((t) => `${neutralizeDelimiter(t.role)}: ${neutralizeDelimiter(t.content)}`).join("\n");
   return `<transcript>\n${body}\n</transcript>`;
 }
 

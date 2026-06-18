@@ -1258,8 +1258,12 @@ async function handleMemoryCommand(subcommand: string | undefined, rest: string[
     const conversationId = positionals[0];
     if (!conversationId) throw new Error("memory extract requires <conversation-id>");
     if (!useApi) throw new Error("memory extract requires the server (host execution; no --direct path).");
+    // Forward the host-execution run token in auth-off mode (the server requires it
+    // there). With auth on, requestApi already sends the user's API_TOKEN bearer.
+    const runToken = process.env.COMPANY_BRAIN_API_TOKEN ? undefined : process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
     const data = await requestApi<{ extraction: unknown }>(`/api/conversations/${encodeURIComponent(conversationId)}/extract`, {
       method: "POST",
+      headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
       body: JSON.stringify({})
     });
     printJson(data);

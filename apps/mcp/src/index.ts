@@ -821,9 +821,13 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   },
   async ({ id }) => {
+    // Forward the host-execution run token in auth-off mode; with auth on, requestApi
+    // already sends the user's API_TOKEN bearer (don't clobber it with the run token).
+    const runToken = process.env.COMPANY_BRAIN_API_TOKEN ? undefined : process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
     return toolResult(
       await requestApi<{ extraction: unknown }>(`/api/conversations/${encodeURIComponent(id)}/extract`, {
         method: "POST",
+        headers: runToken ? { Authorization: `Bearer ${runToken}` } : undefined,
         body: JSON.stringify({})
       })
     );

@@ -102,3 +102,21 @@ test("kind filter restricts hybrid/bm25 results to matching memories", async () 
     assert.deepEqual(decisions.results.map((r) => r.id), ["d1"]);
   });
 });
+
+test("hybrid results expose the fused RRF score (not zeroed)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cb-hyb3-"));
+  const db = await createDb(dir);
+  try {
+    const embeddings = createEmbeddingRegistry();
+    embeddings.register(keywordProvider(["typescript"]));
+    const mem = await createMemoryStore(db, { embeddings });
+    await db.query("insert into memories (id, kind, subject, content, status) values ($1,'fact','ada','ada likes typescript','active')", ["m1"]);
+    await embedChunks(db, embeddings.get("kw")!, await gatherChunks(db));
+    const hybrid = await mem.recall("typescript", 10, "hybrid_rrf_v1");
+    assert.ok(hybrid.results.length >= 1);
+    assert.ok(hybrid.results[0].score > 0, "fused RRF score should be exposed, not 0");
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

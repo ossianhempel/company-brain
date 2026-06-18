@@ -1,11 +1,11 @@
 import { serve } from "@hono/node-server";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { createDb } from "@company-brain/db";
 import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writer";
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
-import { readCookie, verifySignedValue, SESSION_COOKIE, type Principal } from "@company-brain/auth";
+import { readCookie, verifySignedValue, roleAtLeast, routeRequirement, SESSION_COOKIE, type Principal } from "@company-brain/auth";
 import { buildAuth } from "./auth.ts";
 import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
@@ -155,6 +155,11 @@ const serverAuth = await buildAuth(db);
 // Routes reachable without a principal (so login + liveness work pre-auth).
 const PUBLIC_PATHS = new Set(["/health", "/api/auth/login"]);
 
+// The committed identity: the authenticated principal when auth is on, else the
+// client-supplied actor (preserving web/cli/mcp attribution in single-user mode).
+const committer = (c: Context<{ Variables: { principal: Principal } }>, clientActor?: string): string =>
+  serverAuth.enabled ? c.get("principal").name : clientActor ?? "local-user";
+
 app.use("*", async (c, next) => {
   const principal = await serverAuth.auth.resolve({
     authorization: c.req.header("authorization"),
@@ -165,6 +170,19 @@ app.use("*", async (c, next) => {
     return c.json({ error: "unauthorized" }, 401);
   }
   c.set("principal", principal);
+  return next();
+});
+
+// RBAC: reads need viewer, writes editor, host-execution (agent run, admin reindex)
+// admin. When auth is off the principal is admin, so nothing is gated. Auth/liveness
+// routes are public here (handled by the auth middleware above).
+app.use("*", async (c, next) => {
+  const requirement = routeRequirement(c.req.method, c.req.path);
+  if (requirement.kind === "public") return next();
+  const principal = c.get("principal");
+  if (!principal || !roleAtLeast(principal.role, requirement.role)) {
+    return c.json({ error: "forbidden", required: requirement.role }, 403);
+  }
   return next();
 });
 
@@ -244,7 +262,7 @@ app.put("/api/agents/:slug/file", async (c) => {
       enabled: z.boolean().optional()
     })
     .parse(await c.req.json());
-  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor, {
+  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, committer(c, body.actor), {
     name: body.name,
     provider: body.provider,
     model: body.model,
@@ -269,7 +287,10 @@ app.post("/api/agents/:slug/run", async (c) => {
       403
     );
   }
-  if (agentRunToken && c.req.header("authorization") !== `Bearer ${agentRunToken}`) {
+  // The legacy run-token gate is the pre-auth second factor. When auth is enabled,
+  // RBAC (admin) is the gate and the Authorization header carries the user's token,
+  // so the run-token check only applies in the unauthenticated (auth-off) mode.
+  if (!serverAuth.enabled && agentRunToken && c.req.header("authorization") !== `Bearer ${agentRunToken}`) {
     return c.json({ error: "Unauthorized" }, 401);
   }
   const body = z
@@ -280,7 +301,7 @@ app.post("/api/agents/:slug/run", async (c) => {
       agentSlug: c.req.param("slug"),
       prompt: body.prompt,
       providerOverride: body.provider,
-      actor: body.actor,
+      actor: committer(c, body.actor),
     });
     return c.json({ conversation });
   } catch (err) {
@@ -320,7 +341,7 @@ app.get("/api/conversations/:id", async (c) => {
 
 app.post("/api/conversations/:id/archive", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const conversation = await agents.archiveConversation(c.req.param("id"), body.actor);
+  const conversation = await agents.archiveConversation(c.req.param("id"), committer(c, body.actor));
   if (!conversation) return c.json({ error: "Conversation not found" }, 404);
   return c.json({ conversation });
 });
@@ -340,7 +361,7 @@ app.get("/api/search/pages", async (c) => {
 
 app.post("/api/workspace/init", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  return c.json({ pages: await pages.ensureParaWorkspace(body.actor) }, 201);
+  return c.json({ pages: await pages.ensureParaWorkspace(committer(c, body.actor)) }, 201);
 });
 
 app.post("/api/projects", async (c) => {
@@ -350,7 +371,7 @@ app.post("/api/projects", async (c) => {
       actor: z.string().min(1).optional()
     })
     .parse(await c.req.json());
-  return c.json({ pages: await pages.createProject(body.name, body.actor) }, 201);
+  return c.json({ pages: await pages.createProject(body.name, committer(c, body.actor)) }, 201);
 });
 
 app.get("/api/recall", async (c) => {
@@ -360,13 +381,13 @@ app.get("/api/recall", async (c) => {
 
 app.post("/api/source-artifacts", async (c) => {
   const body = artifactInput.parse(await c.req.json());
-  const artifact = await memory.ingestArtifact(body);
+  const artifact = await memory.ingestArtifact({ ...body, actor: committer(c, body.actor) });
   return c.json({ artifact }, 201);
 });
 
 app.post("/api/source-artifacts/:id/forget", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const artifact = await memory.forgetArtifact(c.req.param("id"), body.actor);
+  const artifact = await memory.forgetArtifact(c.req.param("id"), committer(c, body.actor));
   if (!artifact) {
     return c.json({ error: "Source artifact not found" }, 404);
   }
@@ -378,6 +399,7 @@ app.post("/api/memories", async (c) => {
   const body = memoryInput.parse(await c.req.json());
   const savedMemory = await memory.saveMemory({
     ...body,
+    actor: committer(c, body.actor),
     sources: body.sources?.map((source) => ({
       sourceType: source.sourceType,
       pageId: source.pageId ?? null,
@@ -429,13 +451,13 @@ app.put("/api/entities/:slug/file", async (c) => {
   const body = z
     .object({ markdown: z.string(), actor: z.string().min(1).optional() })
     .parse(await c.req.json());
-  const profile = await memory.saveEntityFile(c.req.param("slug"), body.markdown, body.actor);
+  const profile = await memory.saveEntityFile(c.req.param("slug"), body.markdown, committer(c, body.actor));
   return c.json(profile);
 });
 
 app.post("/api/memories/:id/forget", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const savedMemory = await memory.forgetMemory(c.req.param("id"), body.actor);
+  const savedMemory = await memory.forgetMemory(c.req.param("id"), committer(c, body.actor));
   if (!savedMemory) {
     return c.json({ error: "Memory not found" }, 404);
   }
@@ -472,7 +494,7 @@ app.get("/api/pages/:id/versions/:versionId", async (c) => {
 
 app.post("/api/pages/:id/versions/:versionId/restore", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const page = await pages.restoreVersion(c.req.param("id"), c.req.param("versionId"), body.actor);
+  const page = await pages.restoreVersion(c.req.param("id"), c.req.param("versionId"), committer(c, body.actor));
   if (!page) {
     return c.json({ error: "Page version not found" }, 404);
   }
@@ -482,7 +504,7 @@ app.post("/api/pages/:id/versions/:versionId/restore", async (c) => {
 
 app.post("/api/pages", async (c) => {
   const body = pageInput.parse(await c.req.json());
-  const page = await pages.create(body);
+  const page = await pages.create({ ...body, actor: committer(c, body.actor) });
   return c.json({ page }, 201);
 });
 
@@ -490,7 +512,7 @@ app.put("/api/pages/:id", async (c) => {
   // baseVersion = the page's last-commit oid the client last saw; a stale token
   // surfaces as a 409 (WorkspaceConflictError → onError) instead of a silent overwrite.
   const body = pageInput.partial().extend({ baseVersion: z.string().nullish() }).parse(await c.req.json());
-  const page = await pages.update(c.req.param("id"), body);
+  const page = await pages.update(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
   if (!page) {
     return c.json({ error: "Page not found" }, 404);
   }
@@ -500,7 +522,7 @@ app.put("/api/pages/:id", async (c) => {
 
 app.delete("/api/pages/:id", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const page = await pages.softDelete(c.req.param("id"), body.actor);
+  const page = await pages.softDelete(c.req.param("id"), committer(c, body.actor));
   if (!page) {
     return c.json({ error: "Page not found" }, 404);
   }
@@ -510,7 +532,7 @@ app.delete("/api/pages/:id", async (c) => {
 
 app.post("/api/pages/:id/duplicate", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const page = await pages.duplicate(c.req.param("id"), body.actor);
+  const page = await pages.duplicate(c.req.param("id"), committer(c, body.actor));
   if (!page) {
     return c.json({ error: "Page not found" }, 404);
   }
@@ -521,7 +543,7 @@ app.post("/api/pages/:id/duplicate", async (c) => {
 app.post("/api/pages/:id/move", async (c) => {
   const body = pageMoveInput.parse(await c.req.json().catch(() => ({})));
   try {
-    const page = await pages.move(c.req.param("id"), body);
+    const page = await pages.move(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
     if (!page) {
       return c.json({ error: "Page not found" }, 404);
     }
@@ -535,7 +557,7 @@ app.post("/api/pages/:id/move", async (c) => {
 app.post("/api/pages/:id/comments", async (c) => {
   const body = pageCommentInput.parse(await c.req.json());
   try {
-    const comment = await pages.addComment(c.req.param("id"), body);
+    const comment = await pages.addComment(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
     if (!comment) {
       return c.json({ error: "Page not found" }, 404);
     }
@@ -548,7 +570,7 @@ app.post("/api/pages/:id/comments", async (c) => {
 
 app.delete("/api/pages/:id/comments/:commentId", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const comment = await pages.deleteComment(c.req.param("id"), c.req.param("commentId"), body.actor);
+  const comment = await pages.deleteComment(c.req.param("id"), c.req.param("commentId"), committer(c, body.actor));
   if (!comment) {
     return c.json({ error: "Comment not found" }, 404);
   }
@@ -558,7 +580,7 @@ app.delete("/api/pages/:id/comments/:commentId", async (c) => {
 
 app.post("/api/pages/:id/share-links", async (c) => {
   const body = pageShareInput.parse(await c.req.json().catch(() => ({})));
-  const shareLink = await pages.createShareLink(c.req.param("id"), body);
+  const shareLink = await pages.createShareLink(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
   if (!shareLink) {
     return c.json({ error: "Page not found" }, 404);
   }
@@ -568,7 +590,7 @@ app.post("/api/pages/:id/share-links", async (c) => {
 
 app.post("/api/pages/:id/share-links/:shareLinkId/revoke", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const shareLink = await pages.revokeShareLink(c.req.param("id"), c.req.param("shareLinkId"), body.actor);
+  const shareLink = await pages.revokeShareLink(c.req.param("id"), c.req.param("shareLinkId"), committer(c, body.actor));
   if (!shareLink) {
     return c.json({ error: "Share link not found" }, 404);
   }
@@ -578,7 +600,7 @@ app.post("/api/pages/:id/share-links/:shareLinkId/revoke", async (c) => {
 
 app.put("/api/pages/:id/permissions", async (c) => {
   const body = pagePermissionInput.parse(await c.req.json());
-  const page = await pages.updatePermissions(c.req.param("id"), body);
+  const page = await pages.updatePermissions(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
   if (!page) {
     return c.json({ error: "Page not found" }, 404);
   }
@@ -588,7 +610,7 @@ app.put("/api/pages/:id/permissions", async (c) => {
 
 app.post("/api/pages/:id/source-artifacts", async (c) => {
   const body = pageSourceInput.parse(await c.req.json());
-  const source = await pages.createAndAttachSourceArtifact(c.req.param("id"), body);
+  const source = await pages.createAndAttachSourceArtifact(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
   if (!source) {
     return c.json({ error: "Page not found" }, 404);
   }
@@ -599,7 +621,7 @@ app.post("/api/pages/:id/source-artifacts", async (c) => {
 app.post("/api/pages/:id/source-artifacts/attach", async (c) => {
   const body = pageSourceAttachInput.parse(await c.req.json());
   try {
-    const source = await pages.attachSourceArtifact(c.req.param("id"), body);
+    const source = await pages.attachSourceArtifact(c.req.param("id"), { ...body, actor: committer(c, body.actor) });
     if (!source) {
       return c.json({ error: "Page not found" }, 404);
     }
@@ -612,7 +634,7 @@ app.post("/api/pages/:id/source-artifacts/attach", async (c) => {
 
 app.delete("/api/pages/:id/source-artifacts/:sourceId", async (c) => {
   const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
-  const source = await pages.detachSourceArtifact(c.req.param("id"), c.req.param("sourceId"), body.actor);
+  const source = await pages.detachSourceArtifact(c.req.param("id"), c.req.param("sourceId"), committer(c, body.actor));
   if (!source) {
     return c.json({ error: "Page source not found" }, 404);
   }

@@ -7,6 +7,7 @@ import {
   verifySignedValue,
   readCookie,
   roleAtLeast,
+  routeRequirement,
   LOCAL_PRINCIPAL,
   SESSION_COOKIE,
   type AuthLookup,
@@ -71,4 +72,17 @@ test("roleAtLeast ranks viewer < editor < admin", () => {
   assert.equal(roleAtLeast("editor", "editor"), true);
   assert.equal(roleAtLeast("viewer", "editor"), false);
   assert.equal(roleAtLeast("editor", "admin"), false);
+});
+
+test("routeRequirement: reads viewer, writes editor, host-exec/admin admin, auth public", () => {
+  assert.deepEqual(routeRequirement("GET", "/api/pages"), { kind: "role", role: "viewer" });
+  assert.deepEqual(routeRequirement("PUT", "/api/pages/abc"), { kind: "role", role: "editor" });
+  assert.deepEqual(routeRequirement("POST", "/api/pages"), { kind: "role", role: "editor" });
+  assert.deepEqual(routeRequirement("POST", "/api/admin/reindex"), { kind: "role", role: "admin" });
+  assert.deepEqual(routeRequirement("POST", "/api/agents/scribe/run"), { kind: "role", role: "admin" });
+  // a non-run agent write is editor, not admin
+  assert.deepEqual(routeRequirement("PUT", "/api/agents/scribe/file"), { kind: "role", role: "editor" });
+  assert.deepEqual(routeRequirement("GET", "/health"), { kind: "public" });
+  assert.deepEqual(routeRequirement("POST", "/api/auth/login"), { kind: "public" });
+  assert.deepEqual(routeRequirement("POST", "/api/auth/logout"), { kind: "public" });
 });

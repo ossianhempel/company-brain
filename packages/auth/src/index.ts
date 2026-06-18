@@ -68,6 +68,24 @@ export function readCookie(cookieHeader: string | undefined, name: string): stri
 
 export const SESSION_COOKIE = "cb_session";
 
+/** The access requirement for a route. `public` → no role check (any/no principal). */
+export type RouteRequirement = { kind: "public" } | { kind: "role"; role: Role };
+
+const ADMIN_PATTERNS = [/^\/api\/admin\//, /^\/api\/agents\/[^/]+\/run$/];
+
+/**
+ * RBAC policy by method + path. Reads require viewer, writes editor, and
+ * host-execution / admin routes (agent run, admin reindex) require admin.
+ * Auth + liveness routes are public (the auth middleware handles their identity).
+ */
+export function routeRequirement(method: string, path: string): RouteRequirement {
+  if (path === "/health" || path.startsWith("/api/auth/")) return { kind: "public" };
+  if (ADMIN_PATTERNS.some((re) => re.test(path))) return { kind: "role", role: "admin" };
+  const verb = method.toUpperCase();
+  const isWrite = verb !== "GET" && verb !== "HEAD" && verb !== "OPTIONS";
+  return { kind: "role", role: isWrite ? "editor" : "viewer" };
+}
+
 /** DB-backed lookups, injected by the server. */
 export interface AuthLookup {
   userByTokenHash(hash: string): Promise<Principal | null>;

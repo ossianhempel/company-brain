@@ -1575,3 +1575,16 @@ textarea {
   padding: 0 9px;
   font-size: 13px;
 }
+
+.conflictNote {
+  color: #b4451f;
+}
+.linkButton {
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}

@@ -528,6 +528,7 @@ export function App() {
   const [loginToken, setLoginToken] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [suggestState, setSuggestState] = useState<"idle" | "saving" | "sent" | "error">("idle");
+  const [saveConflict, setSaveConflict] = useState(false);
   const [dragTarget, setDragTarget] = useState<DragTarget | null>(null);
   const titleRef = useRef(title);
   const htmlRef = useRef(html);
@@ -1337,12 +1338,16 @@ export function App() {
       body: JSON.stringify({ title: nextTitle, html: nextHtml, actor: "web", baseVersion })
     });
     if (!response.ok) {
-      // 409 = someone else changed this page. Reload the latest + flag the conflict
-      // (a full merge UI is deferred); the user re-applies their edit on fresh content.
       setSaveState("error");
-      if (response.status === 409) await loadPageDetail(id);
+      // 409 = the page changed since we loaded it. Do NOT refresh the version token
+      // here: refreshing it without also refreshing the editor content would let the
+      // next save overwrite the other change with our stale body. Keep the stale token
+      // (so a blind re-save conflicts again) and flag it — the user reloads to get the
+      // latest body + token together (a full merge UI is deferred).
+      if (response.status === 409) setSaveConflict(true);
       return null;
     }
+    setSaveConflict(false);
     const data = (await response.json()) as { page: Page };
     setPages((current) => orderPages(current.map((page) => (page.id === data.page.id ? data.page : page))));
     await loadPageDetail(data.page.id);
@@ -2237,6 +2242,15 @@ export function App() {
                 <span>Created by {selectedPage.createdBy}</span>
                 <span>Modified by {selectedPage.updatedBy}</span>
                 <span>{saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving..." : saveState === "dirty" ? "Unsaved" : "Save failed"}</span>
+                {saveConflict && (
+                  <span className="conflictNote">
+                    Changed elsewhere — your save was blocked.{" "}
+                    <button type="button" className="linkButton" onClick={() => window.location.reload()}>
+                      Reload latest
+                    </button>{" "}
+                    (discards unsaved edits)
+                  </span>
+                )}
               </div>
             )}
           </div>

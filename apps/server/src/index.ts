@@ -5,6 +5,8 @@ import { z } from "zod";
 import { createDb } from "@company-brain/db";
 import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writer";
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
+import { readCookie, verifySignedValue, SESSION_COOKIE, type Principal } from "@company-brain/auth";
+import { buildAuth } from "./auth.ts";
 import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 import {
@@ -96,7 +98,7 @@ const memoryListInput = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional()
 });
 
-const app = new Hono();
+const app = new Hono<{ Variables: { principal: Principal } }>();
 const db = await createDb();
 
 // Files+git are canonical; the DB is the derived index. The server is the
@@ -142,6 +144,52 @@ const allowedOrigins = (process.env.COMPANY_BRAIN_ALLOWED_ORIGINS ?? "")
   .map((o) => o.trim())
   .filter(Boolean);
 app.use("*", cors({ origin: (origin) => (allowedOrigins.includes(origin) ? origin : null) }));
+
+// --- Auth boundary (Phase 5) ------------------------------------------------
+// Off by default → every request is a synthetic local-user admin (single-user dev
+// flow unchanged). When COMPANY_BRAIN_ENABLE_AUTH=1, identity comes from a bearer
+// token (CLI/MCP) or a signed session cookie (web); the resolved principal — not
+// the client `actor` string — is the committer.
+const serverAuth = await buildAuth(db);
+
+// Routes reachable without a principal (so login + liveness work pre-auth).
+const PUBLIC_PATHS = new Set(["/health", "/api/auth/login"]);
+
+app.use("*", async (c, next) => {
+  const principal = await serverAuth.auth.resolve({
+    authorization: c.req.header("authorization"),
+    cookie: c.req.header("cookie"),
+  });
+  if (!principal) {
+    if (PUBLIC_PATHS.has(c.req.path)) return next();
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  c.set("principal", principal);
+  return next();
+});
+
+app.post("/api/auth/login", async (c) => {
+  const body = z.object({ email: z.string(), token: z.string() }).parse(await c.req.json());
+  const result = await serverAuth.login(body.email, body.token);
+  if (!result) return c.json({ error: "invalid credentials" }, 401);
+  c.header("Set-Cookie", serverAuth.auth.sessionCookie(result.sessionId, serverAuth.ttlSeconds));
+  return c.json({ user: result.principal });
+});
+
+app.post("/api/auth/logout", async (c) => {
+  // Best-effort session delete when a valid signed cookie is present; clear it regardless.
+  const raw = readCookie(c.req.header("cookie"), SESSION_COOKIE);
+  if (raw) {
+    const sessionId = verifySignedValue(raw, process.env.COMPANY_BRAIN_SESSION_SECRET ?? "");
+    if (sessionId) await serverAuth.logout(sessionId);
+  }
+  c.header("Set-Cookie", serverAuth.auth.clearCookie());
+  return c.json({ ok: true });
+});
+
+app.get("/api/auth/me", (c) => {
+  return c.json({ user: c.get("principal") });
+});
 
 // Optimistic-concurrency conflicts from the git writer map to HTTP 409.
 app.onError((err, c) => {

@@ -20,6 +20,9 @@ importers:
       '@company-brain/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@company-brain/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -64,6 +67,9 @@ importers:
       '@company-brain/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@company-brain/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -154,6 +160,15 @@ importers:
       '@types/node-cron':
         specifier: ^3.0.11
         version: 3.0.11
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.3
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
+  packages/auth:
+    devDependencies:
       tsx:
         specifier: ^4.19.4
         version: 4.22.3

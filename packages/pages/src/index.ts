@@ -40,6 +40,8 @@ export type PageLink = {
 };
 
 export type PageWithRelations = Page & {
+  /** Per-file optimistic-concurrency token (last-commit oid); null outside file mode. */
+  version: string | null;
   outgoingLinks: PageLink[];
   backlinks: Page[];
   relatedPages: Page[];
@@ -1013,11 +1015,18 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
    * rebuildable from the file alone. On a rename, the old file is removed in the
    * same commit.
    */
+  /** Last-commit oid of a page's file — the per-file optimistic-concurrency token. */
+  async function pageVersion(slug: string): Promise<string | null> {
+    if (!fileMode) return null;
+    return gitWriter!.lastCommitOid(workspace!.pageFilePath(slug));
+  }
+
   async function writePageFile(
     page: Page,
     actor: string,
     oldSlug?: string,
-    exclusive = false
+    exclusive = false,
+    expectedVersion?: string | null
   ): Promise<void> {
     if (!fileMode) return;
     const ws = workspace!;
@@ -1053,6 +1062,13 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
       paths,
       message: `save ${page.slug}`,
       actor: { name: actor },
+      // Per-file conflict check. On a rename the editor's baseVersion is the OLD
+      // file's last-commit oid (the file they loaded), so check the source path —
+      // a stale rename must still conflict, not silently clobber the renamed-from page.
+      expectedPathVersion:
+        expectedVersion !== undefined
+          ? { path: renamed ? ws.pageFilePath(renamed) : ws.pageFilePath(page.slug), oid: expectedVersion }
+          : undefined,
       write: async () => {
         await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt, { exclusive });
         if (renamed) await ws.deletePage(renamed);
@@ -1069,11 +1085,12 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
     page: Page,
     actor: string,
     oldSlug?: string,
-    exclusive = false
+    exclusive = false,
+    expectedVersion?: string | null
   ): Promise<Page> {
     // writePageFile commits, and the git writer's commit hook reindexes inside
     // the same serialized mutation, so the DB is current once this resolves.
-    await writePageFile(page, actor, oldSlug, exclusive);
+    await writePageFile(page, actor, oldSlug, exclusive, expectedVersion);
     return (await getBySlug(page.slug)) ?? page;
   }
 
@@ -1322,6 +1339,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
 
       return {
         ...page,
+        version: await pageVersion(page.slug),
         outgoingLinks: outgoing.rows.map(toPageLink),
         backlinks,
         relatedPages: backlinks,
@@ -1331,6 +1349,8 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
         sources: sources.rows.map(toPageSourceArtifact)
       };
     },
+
+    pageVersion,
 
     async attachSourceArtifact(id: string, input: { artifactId: string; label?: string | null; actor?: string }) {
       const page = await this.get(id);
@@ -1894,7 +1914,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
       return pages;
     },
 
-    async update(id: string, input: Partial<PageInput>) {
+    async update(id: string, input: Partial<PageInput> & { baseVersion?: string | null }) {
       const current = await this.get(id);
       if (!current) {
         return null;
@@ -1924,7 +1944,7 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
           updatedBy: actor,
           updatedAt: now,
         };
-        const saved = await persistPageFileMode(page, actor, current.slug);
+        const saved = await persistPageFileMode(page, actor, current.slug, false, input.baseVersion);
         await recordPageActivity(pageDb, id, "page.updated", `Updated ${saved.title}`, actor, {
           previousTitle: current.title,
           title: saved.title,

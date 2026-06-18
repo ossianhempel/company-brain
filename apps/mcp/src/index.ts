@@ -84,12 +84,16 @@ const server = new McpServer({
 });
 
 async function requestApi<T>(path: string, init?: RequestInit) {
+  // Authenticate with a bearer token when the server has auth enabled
+  // (COMPANY_BRAIN_API_TOKEN); unset in the default install → no header.
+  const apiToken = process.env.COMPANY_BRAIN_API_TOKEN;
   let response: Response;
   try {
     response = await fetch(`${apiUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
+        ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
         ...init?.headers
       }
     });
@@ -801,6 +805,69 @@ server.registerTool(
   async ({ id }) => {
     return toolResult(
       await requestApi<{ conversation: unknown }>(`/api/conversations/${encodeURIComponent(id)}/archive`, {
+        method: "POST",
+        body: JSON.stringify({ actor: "mcp" })
+      })
+    );
+  }
+);
+
+server.registerTool(
+  "company_brain_list_suggestions",
+  {
+    title: "List Suggestions",
+    description: "List suggest-changes proposals, optionally filtered by status (open/approved/rejected) or target page id.",
+    inputSchema: {
+      status: z.enum(["open", "approved", "rejected"]).optional().describe("Filter by lifecycle status."),
+      target: z.string().optional().describe("Filter by target page id.")
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ status, target }) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (target) params.set("target", target);
+    const query = params.toString();
+    return toolResult(await requestApi<{ suggestions: unknown[] }>(`/api/suggestions${query ? `?${query}` : ""}`));
+  }
+);
+
+server.registerTool(
+  "company_brain_suggest_edit",
+  {
+    title: "Suggest Page Edit",
+    description: "Propose an edit to a page (suggest-changes). Writes a proposal; an approver applies it through the single writer. Use this instead of a direct edit when you lack write access or want review.",
+    inputSchema: {
+      pageId: z.string().min(1).describe("Target page id."),
+      title: z.string().min(1).describe("Short title for the proposal."),
+      proposedMarkdown: z.string().min(1).describe("The full proposed page body as markdown.")
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  },
+  async ({ pageId, title, proposedMarkdown }) => {
+    return toolResult(
+      await requestApi<{ suggestion: unknown }>(`/api/pages/${encodeURIComponent(pageId)}/suggestions`, {
+        method: "POST",
+        body: JSON.stringify({ proposedMarkdown, title, actor: "mcp" })
+      })
+    );
+  }
+);
+
+server.registerTool(
+  "company_brain_resolve_suggestion",
+  {
+    title: "Approve or Reject Suggestion",
+    description: "Approve a suggestion (applies the proposed body to the target page through the single writer) or reject it.",
+    inputSchema: {
+      id: z.string().min(1).describe("Suggestion id."),
+      decision: z.enum(["approve", "reject"]).describe("Approve to apply, reject to decline.")
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ id, decision }) => {
+    return toolResult(
+      await requestApi<{ suggestion: unknown }>(`/api/suggestions/${encodeURIComponent(id)}/${decision}`, {
         method: "POST",
         body: JSON.stringify({ actor: "mcp" })
       })

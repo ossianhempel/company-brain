@@ -559,6 +559,58 @@ async function migrateDb(db: CompanyBrainDb) {
     create index if not exists conversations_deleted_at_idx on conversations (deleted_at);
   `);
 
+  // Phase 5: multi-user. users/sessions/role_grants are DB-canonical operational
+  // state (NOT git, NOT rebuildable from files — they hold credentials/identity).
+  // suggestions is a DERIVED index of suggestions/<id>.md proposal files (rebuildable).
+  await applyMigration(db, 14, `
+    create table if not exists users (
+      id text primary key,
+      name text not null,
+      email text,
+      role text not null default 'viewer',
+      secret_hash text,
+      created_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+    create unique index if not exists users_email_live_idx on users (email) where deleted_at is null and email is not null;
+
+    create table if not exists sessions (
+      id text primary key,
+      user_id text not null references users(id) on delete cascade,
+      expires_at timestamptz not null,
+      created_at timestamptz not null default now()
+    );
+    create index if not exists sessions_user_id_idx on sessions (user_id);
+    create index if not exists sessions_expires_at_idx on sessions (expires_at);
+
+    create table if not exists role_grants (
+      id text primary key,
+      user_id text not null references users(id) on delete cascade,
+      scope text not null default 'workspace',
+      page_slug text,
+      role text not null default 'viewer'
+    );
+    create index if not exists role_grants_user_id_idx on role_grants (user_id);
+
+    create table if not exists suggestions (
+      id text primary key,
+      slug text not null default '',
+      target_page_id text not null default '',
+      base_oid text,
+      author text not null default '',
+      status text not null default 'open',
+      title text not null default '',
+      content_hash text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      deleted_at timestamptz
+    );
+    create unique index if not exists suggestions_slug_live_idx on suggestions (slug) where deleted_at is null;
+    create index if not exists suggestions_status_idx on suggestions (status);
+    create index if not exists suggestions_target_idx on suggestions (target_page_id);
+    create index if not exists suggestions_deleted_at_idx on suggestions (deleted_at);
+  `);
+
 }
 
 async function applyMigration(db: CompanyBrainDb, version: number, sql: string) {

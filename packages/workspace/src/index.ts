@@ -69,6 +69,7 @@ const AGENTS_DIR = "agents";
 const JOBS_DIR = "jobs";
 /** Subdirectory for conversation transcripts (markdown, written once). */
 const CONVERSATIONS_DIR = "conversations";
+const SUGGESTIONS_DIR = "suggestions";
 
 // Sanitize allowlist mirrors packages/pages `prepareHtml` so the HTML boundary
 // is identical whether content arrives from the editor or is re-derived from a
@@ -406,6 +407,18 @@ export function createWorkspace(options: WorkspaceOptions) {
   const deleteConversation = (slug: string) => deleteFileIn(CONVERSATIONS_DIR, slug);
   const listConversationSlugs = () => listSlugsIn(CONVERSATIONS_DIR);
 
+  // Suggestion-area wrappers (markdown-with-frontmatter proposal files).
+  const suggestionFilePath = (slug: string) => areaFilePath(SUGGESTIONS_DIR, slug);
+  const readSuggestion = (slug: string) => readFileIn(SUGGESTIONS_DIR, slug);
+  const writeSuggestion = (
+    slug: string,
+    input: { frontmatter: Partial<PageFrontmatter>; markdown: string },
+    now: string,
+    options: { exclusive?: boolean } = {}
+  ) => writeFileIn(SUGGESTIONS_DIR, slug, input, now, options);
+  const deleteSuggestion = (slug: string) => deleteFileIn(SUGGESTIONS_DIR, slug);
+  const listSuggestionSlugs = () => listSlugsIn(SUGGESTIONS_DIR);
+
   // Job-area wrappers (raw YAML).
   const jobFilePath = (slug: string) => rawFilePath(JOBS_DIR, slug, "yaml");
   const readJob = (slug: string) => readRawIn(JOBS_DIR, slug, "yaml");
@@ -451,6 +464,12 @@ export function createWorkspace(options: WorkspaceOptions) {
     writeConversation,
     deleteConversation,
     listConversationSlugs,
+    // suggestions area
+    suggestionFilePath,
+    readSuggestion,
+    writeSuggestion,
+    deleteSuggestion,
+    listSuggestionSlugs,
     // jobs area (raw YAML)
     jobFilePath,
     readJob,

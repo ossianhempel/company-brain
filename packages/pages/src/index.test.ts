@@ -566,3 +566,53 @@ test("file mode: getVersion attributes to the commit author, not the page owner"
     assert.equal(got?.createdBy, "alice"); // commit author, not the "carol" owner
   });
 });
+
+// --- Phase 5: per-file optimistic concurrency (store level) -----------------
+
+test("update with a stale baseVersion conflicts; current version succeeds", async () => {
+  await withFilePageStore(async (pages) => {
+    const created = await pages.create({ title: "Concurrency", html: "<h1>Concurrency</h1><p>v1</p>", actor: "a" });
+    const v1 = await pages.pageVersion(created.slug);
+    assert.ok(v1);
+
+    // a save with the current version succeeds and advances the version
+    const saved = await pages.update(created.id, { html: "<h1>Concurrency</h1><p>v2</p>", actor: "a", baseVersion: v1 });
+    assert.ok(saved);
+    const v2 = await pages.pageVersion(created.slug);
+    assert.notEqual(v1, v2);
+
+    // a second save with the now-stale v1 conflicts
+    await assert.rejects(
+      () => pages.update(created.id, { html: "<h1>Concurrency</h1><p>v3</p>", actor: "b", baseVersion: v1 }),
+      /Stale write|conflict/i
+    );
+
+    // a save without a baseVersion still works (opt-in concurrency)
+    const ok = await pages.update(created.id, { html: "<h1>Concurrency</h1><p>v4</p>", actor: "a" });
+    assert.ok(ok);
+  });
+});
+
+test("getWithRelations surfaces a per-file version token", async () => {
+  await withFilePageStore(async (pages) => {
+    const created = await pages.create({ title: "Versioned", html: "<h1>Versioned</h1>", actor: "a" });
+    const detail = await pages.getWithRelations(created.id);
+    assert.ok(detail?.version);
+    assert.equal(detail.version, await pages.pageVersion(created.slug));
+  });
+});
+
+test("a rename edit with a stale baseVersion still conflicts (no rename bypass)", async () => {
+  await withFilePageStore(async (pages) => {
+    const created = await pages.create({ title: "Original", html: "<h1>Original</h1><p>v1</p>", actor: "a" });
+    const v1 = await pages.pageVersion(created.slug);
+    // another writer edits the same page (no rename) → advances its file version
+    await pages.update(created.id, { html: "<h1>Original</h1><p>v2</p>", actor: "b", baseVersion: v1 });
+    // a stale editor now renames (title change) using the old v1 → must conflict,
+    // not silently clobber the v2 edit by slipping through the rename path
+    await assert.rejects(
+      () => pages.update(created.id, { title: "Renamed", html: "<h1>Renamed</h1><p>stale</p>", actor: "a", baseVersion: v1 }),
+      /Stale write|conflict/i
+    );
+  });
+});

@@ -1,18 +1,18 @@
 {
-  "name": "@company-brain/cli",
+  "name": "@company-brain/suggestions",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
-    "dev": "COMPANY_BRAIN_DATA_DIR=${COMPANY_BRAIN_DATA_DIR:-../../data/pgdata} tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test --test-concurrency=1 src/suggestion-file.test.ts src/index.test.ts"
   },
   "dependencies": {
-    "@company-brain/agents": "workspace:*",
-    "@company-brain/auth": "workspace:*",
     "@company-brain/db": "workspace:*",
     "@company-brain/git-writer": "workspace:*",
-    "@company-brain/memory": "workspace:*",
     "@company-brain/pages": "workspace:*",
     "@company-brain/workspace": "workspace:*"
   },

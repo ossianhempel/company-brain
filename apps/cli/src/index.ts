@@ -57,8 +57,12 @@ const migrationTables = [
   "memory_sources",
   "agents",
   "jobs",
-  "conversations"
+  "conversations",
+  "users",
+  "role_grants",
+  "suggestions"
 ];
+// sessions are intentionally omitted — ephemeral; users re-authenticate after a migrate.
 
 function parseFlags(args: string[]) {
   const flags: Flags = {};
@@ -285,10 +289,14 @@ async function resolvePage(ref: string) {
 }
 
 async function requestApi<T>(path: string, init?: RequestInit) {
+  // When the server has auth enabled, the CLI authenticates with a bearer token
+  // (COMPANY_BRAIN_API_TOKEN). Unset in the default single-user install → no header.
+  const apiToken = process.env.COMPANY_BRAIN_API_TOKEN;
   const response = await fetch(`${defaultApiUrl}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
       ...init?.headers
     }
   });
@@ -531,6 +539,10 @@ async function main() {
       await handleProvidersCommand([subcommand, ...rest].filter((x): x is string => Boolean(x)));
       return;
     }
+    if (command === "suggestions") {
+      await handleSuggestionsCommand(subcommand, rest);
+      return;
+    }
 
     throw new Error(`Unknown command: ${command}`);
   }
@@ -655,10 +667,16 @@ async function main() {
       throw new Error(`Page not found: ${ref}`);
     }
 
+    // Participate in per-file optimistic concurrency by default: send the version
+    // we just fetched so a concurrent edit returns 409. --force opts out (last-write-
+    // wins). Omit baseVersion when null — in --direct mode getPage resolves via the
+    // DB-only store (version always null), and null means "must have no prior commit",
+    // which would conflict on every committed page.
     const body = {
       title: flagString(flags, "title"),
       html: await htmlFromFlags(flags),
-      actor: flagString(flags, "actor") ?? "cli"
+      actor: flagString(flags, "actor") ?? "cli",
+      ...(flags.force || current.version == null ? {} : { baseVersion: current.version })
     };
     const page = useApi
       ? (await requestApi<{ page: Page }>(`/api/pages/${current.id}`, {
@@ -1000,7 +1018,11 @@ async function handleAgentsCommand(subcommand: string | undefined, rest: string[
     if (flags.direct && (await canUseApi())) {
       throw new Error("Refusing --direct run: the server is running and owns the workspace. Omit --direct, or stop the server first.");
     }
-    const runToken = process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
+    // The legacy run-token header is only for the auth-off mode. When auth is on
+    // (COMPANY_BRAIN_API_TOKEN set), requestApi already sends the user's admin bearer
+    // and RBAC gates the route — injecting the run token here would overwrite that
+    // bearer (init.headers wins) and the auth middleware would reject the request.
+    const runToken = process.env.COMPANY_BRAIN_API_TOKEN ? undefined : process.env.COMPANY_BRAIN_AGENT_RUN_TOKEN;
     const conversation = useApi
       ? (
           await requestApi<{ conversation: unknown }>(`/api/agents/${encodeURIComponent(slug)}/run`, {
@@ -1085,6 +1107,63 @@ async function handleConversationsCommand(subcommand: string | undefined, rest: 
     return;
   }
   throw new Error(`Unknown conversations subcommand: ${subcommand ?? "(none)"}. Try: list [--status --agent], show <id>, archive <id>`);
+}
+
+async function handleSuggestionsCommand(subcommand: string | undefined, rest: string[]) {
+  // Suggest-changes is a server-mediated flow (approval applies through the single
+  // writer), so it always goes through the API — there is no --direct path.
+  const { flags, positionals, useApi } = await agentMode(rest);
+  if (!useApi) {
+    throw new Error("Company Brain API is not reachable. Suggest-changes requires the server (no --direct path).");
+  }
+  if (subcommand === "list") {
+    const params = new URLSearchParams();
+    const status = flagString(flags, "status");
+    const target = flagString(flags, "target");
+    if (status) params.set("status", status);
+    if (target) params.set("target", target);
+    const query = params.toString();
+    const data = await requestApi<{ suggestions: unknown[] }>(`/api/suggestions${query ? `?${query}` : ""}`);
+    printJson({ suggestions: data.suggestions });
+    return;
+  }
+  if (subcommand === "get") {
+    const id = positionals[0];
+    if (!id) throw new Error("suggestions get requires <id>");
+    const data = await requestApi<{ suggestion: unknown }>(`/api/suggestions/${encodeURIComponent(id)}`);
+    printJson({ suggestion: data.suggestion });
+    return;
+  }
+  if (subcommand === "create") {
+    const pageId = positionals[0];
+    const title = flagString(flags, "title");
+    const markdownFile = flagString(flags, "markdown-file");
+    const proposedMarkdown = flagString(flags, "markdown") ?? (markdownFile ? await readFile(markdownFile, "utf8") : undefined);
+    if (!pageId || !title || !proposedMarkdown) {
+      throw new Error("suggestions create requires <pageId> --title and --markdown or --markdown-file");
+    }
+    const actor = flagString(flags, "actor") ?? "cli";
+    const data = await requestApi<{ suggestion: unknown }>(`/api/pages/${encodeURIComponent(pageId)}/suggestions`, {
+      method: "POST",
+      body: JSON.stringify({ proposedMarkdown, title, actor })
+    });
+    printJson({ suggestion: data.suggestion });
+    return;
+  }
+  if (subcommand === "approve" || subcommand === "reject") {
+    const id = positionals[0];
+    if (!id) throw new Error(`suggestions ${subcommand} requires <id>`);
+    const actor = flagString(flags, "actor") ?? "cli";
+    const data = await requestApi<{ suggestion: unknown }>(`/api/suggestions/${encodeURIComponent(id)}/${subcommand}`, {
+      method: "POST",
+      body: JSON.stringify({ actor })
+    });
+    printJson({ suggestion: data.suggestion });
+    return;
+  }
+  throw new Error(
+    `Unknown suggestions subcommand: ${subcommand ?? "(none)"}. Try: list [--status --target], get <id>, create <pageId> --title --markdown, approve <id>, reject <id>`
+  );
 }
 
 async function handleProvidersCommand(rest: string[]) {

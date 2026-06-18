@@ -20,6 +20,9 @@ importers:
       '@company-brain/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@company-brain/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -64,6 +67,9 @@ importers:
       '@company-brain/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@company-brain/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@company-brain/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -76,6 +82,9 @@ importers:
       '@company-brain/pages':
         specifier: workspace:*
         version: link:../../packages/pages
+      '@company-brain/suggestions':
+        specifier: workspace:*
+        version: link:../../packages/suggestions
       '@company-brain/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace
@@ -161,6 +170,15 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/auth:
+    devDependencies:
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.3
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/db:
     dependencies:
       '@electric-sql/pglite':
@@ -230,6 +248,28 @@ importers:
       '@types/sanitize-html':
         specifier: ^2.16.1
         version: 2.16.1
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
+  packages/suggestions:
+    dependencies:
+      '@company-brain/db':
+        specifier: workspace:*
+        version: link:../db
+      '@company-brain/git-writer':
+        specifier: workspace:*
+        version: link:../git-writer
+      '@company-brain/pages':
+        specifier: workspace:*
+        version: link:../pages
+      '@company-brain/workspace':
+        specifier: workspace:*
+        version: link:../workspace
+    devDependencies:
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.3
       typescript:
         specifier: ^5.8.3
         version: 5.9.3

@@ -150,6 +150,16 @@ type AgentSummary = {
   tags: string[];
 };
 
+type JobSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  enabled: boolean;
+  schedule: string;
+  agent: string;
+  provider: string | null;
+};
+
 type ConversationSummary = {
   id: string;
   agent: string;
@@ -466,11 +476,23 @@ export function App() {
   const [teamAgents, setTeamAgents] = useState<AgentSummary[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(null);
+  const [teamJobs, setTeamJobs] = useState<JobSummary[]>([]);
+  const [agentPersona, setAgentPersona] = useState("");
+  const [agentPersonaSaveState, setAgentPersonaSaveState] = useState<"saved" | "dirty" | "saving">("saved");
+  const [agentRuns, setAgentRuns] = useState<ConversationSummary[]>([]);
   const [agentPrompt, setAgentPrompt] = useState("");
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentRunError, setAgentRunError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
+  const [boardError, setBoardError] = useState<string | null>(null);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onbStep, setOnbStep] = useState(0);
+  const [onbName, setOnbName] = useState("Scribe");
+  const [onbProvider, setOnbProvider] = useState("");
+  const [onbPersona, setOnbPersona] = useState("You are a helpful company-brain agent. Be concise and cite sources.");
+  const [onbBusy, setOnbBusy] = useState(false);
+  const [onbError, setOnbError] = useState<string | null>(null);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [recallQuery, setRecallQuery] = useState("");
@@ -507,6 +529,64 @@ export function App() {
   const dirtyRef = useRef(false);
   const loadingPageRef = useRef(false);
   const draggingPageIdRef = useRef<string | null>(null);
+
+  // First-run onboarding: show the wizard when there are no agents yet and the
+  // user hasn't dismissed it. Detection uses only existing read endpoints.
+  useEffect(() => {
+    if (typeof localStorage !== "undefined" && localStorage.getItem("cb.onboarded")) return;
+    void (async () => {
+      const agentsRes = await fetch("/api/agents");
+      if (!agentsRes.ok) return;
+      const { agents: existing } = (await agentsRes.json()) as { agents: AgentSummary[] };
+      if (existing.length > 0) return;
+      const providersRes = await fetch("/api/providers");
+      if (providersRes.ok) {
+        const { providers: detected } = (await providersRes.json()) as { providers: ProviderStatus[] };
+        setProviders(detected);
+        // Default to the first *available* CLI; if none can run, default to "(none)"
+        // rather than an unavailable provider whose <option> is disabled.
+        setOnbProvider(detected.find((p) => p.detection.available)?.id ?? "");
+      }
+      setOnboardingOpen(true);
+    })();
+  }, []);
+
+  function dismissOnboarding() {
+    if (typeof localStorage !== "undefined") localStorage.setItem("cb.onboarded", "1");
+    setOnboardingOpen(false);
+  }
+
+  async function createFirstAgent() {
+    const name = onbName.trim();
+    if (!name) return;
+    setOnbBusy(true);
+    setOnbError(null);
+    try {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
+      // The wizard is re-openable via Setup. Index check for a friendly message;
+      // exclusive:true is the authoritative guard (server checks the canonical file
+      // inside the writer, so a stale index can't let this overwrite an existing persona).
+      const existing = await fetch(`/api/agents/${encodeURIComponent(slug)}`);
+      if (existing.ok) {
+        setOnbError(`An agent "${slug}" already exists — choose a different name (or edit it in Team).`);
+        return;
+      }
+      const response = await fetch(`/api/agents/${encodeURIComponent(slug)}/file`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markdown: onbPersona, name, provider: onbProvider || undefined, actor: "web", exclusive: true })
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setOnbError(body.error ?? `Create failed (${response.status})`);
+        return;
+      }
+      dismissOnboarding();
+      await openTeamView();
+    } finally {
+      setOnbBusy(false);
+    }
+  }
 
   useEffect(() => {
     titleRef.current = title;
@@ -717,6 +797,13 @@ export function App() {
     );
   }
 
+  // The DATA section (pages editor + memory). Leaving TEAM/TASKS returns here.
+  function backToData() {
+    setMemoryViewOpen(false);
+    setTeamViewOpen(false);
+    setTasksViewOpen(false);
+  }
+
   async function openMemoryView() {
     setMemoryViewOpen(true);
     setTeamViewOpen(false);
@@ -727,14 +814,54 @@ export function App() {
   }
 
   async function loadTeam() {
-    const [agentsRes, providersRes] = await Promise.all([fetch("/api/agents"), fetch("/api/providers")]);
+    const [agentsRes, providersRes, jobsRes] = await Promise.all([
+      fetch("/api/agents"),
+      fetch("/api/providers"),
+      fetch("/api/jobs")
+    ]);
     const agentsData = (await agentsRes.json()) as { agents: AgentSummary[] };
     const providersData = (await providersRes.json()) as { providers: ProviderStatus[] };
+    const jobsData = (await jobsRes.json()) as { jobs: JobSummary[] };
     setTeamAgents(agentsData.agents);
     setProviders(providersData.providers);
-    setSelectedAgentSlug((current) =>
-      current && agentsData.agents.some((a) => a.slug === current) ? current : agentsData.agents[0]?.slug ?? null
-    );
+    setTeamJobs(jobsData.jobs);
+    const next =
+      selectedAgentSlug && agentsData.agents.some((a) => a.slug === selectedAgentSlug)
+        ? selectedAgentSlug
+        : agentsData.agents[0]?.slug ?? null;
+    if (next) await selectAgent(next);
+    else setSelectedAgentSlug(null);
+  }
+
+  async function selectAgent(slug: string) {
+    setSelectedAgentSlug(slug);
+    setAgentRunError(null);
+    const fileRes = await fetch(`/api/agents/${encodeURIComponent(slug)}/file`);
+    setAgentPersona(fileRes.ok ? ((await fileRes.json()) as { markdown: string }).markdown : "");
+    setAgentPersonaSaveState("saved");
+    const runsRes = await fetch(`/api/conversations?agent=${encodeURIComponent(slug)}&limit=20`);
+    setAgentRuns(runsRes.ok ? ((await runsRes.json()) as { conversations: ConversationSummary[] }).conversations : []);
+  }
+
+  async function saveAgentPersona() {
+    if (!selectedAgentSlug) return;
+    setAgentPersonaSaveState("saving");
+    setAgentRunError(null);
+    const response = await fetch(`/api/agents/${encodeURIComponent(selectedAgentSlug)}/file`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown: agentPersona, actor: "web" })
+    });
+    if (!response.ok) {
+      // Keep the user's edits + dirty state; surface the error rather than
+      // reloading (which would clobber the unsaved persona).
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      setAgentRunError(body.error ?? `Save failed (${response.status})`);
+      setAgentPersonaSaveState("dirty");
+      return;
+    }
+    setAgentPersonaSaveState("saved");
+    await loadTeam();
   }
 
   async function openTeamView() {
@@ -788,6 +915,49 @@ export function App() {
     if (!response.ok) return;
     const data = (await response.json()) as { conversation: ConversationDetail };
     setSelectedConversation(data.conversation);
+  }
+
+  async function archiveConversationUi(id: string) {
+    setBoardError(null);
+    const response = await fetch(`/api/conversations/${encodeURIComponent(id)}/archive`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: "web" })
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      setBoardError(body.error ?? `Archive failed (${response.status})`);
+      return;
+    }
+    if (selectedConversation?.id === id) setSelectedConversation(null);
+    await loadConversations();
+  }
+
+  async function rerunConversation(conv: ConversationSummary) {
+    setBoardError(null);
+    // Re-run with the original prompt (the first user turn of the transcript).
+    const detailRes = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}`);
+    if (!detailRes.ok) {
+      setBoardError("Could not load the original prompt.");
+      return;
+    }
+    const detail = (await detailRes.json()) as { conversation: ConversationDetail };
+    const prompt = detail.conversation.turns.find((t) => t.role === "user")?.content ?? "";
+    if (!prompt) {
+      setBoardError("No prompt found to re-run.");
+      return;
+    }
+    const runRes = await fetch(`/api/agents/${encodeURIComponent(conv.agent)}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, actor: "web" })
+    });
+    if (!runRes.ok) {
+      const body = (await runRes.json().catch(() => ({}))) as { error?: string };
+      setBoardError(body.error ?? `Re-run failed (${runRes.status})`);
+      return;
+    }
+    await loadConversations();
   }
 
   async function loadEntities() {
@@ -1040,7 +1210,7 @@ export function App() {
     const data = (await response.json()) as { page: Page };
     setPages((current) => orderPages([data.page, ...current]));
     setSelectedId(data.page.id);
-    setMemoryViewOpen(false);
+    backToData(); // land in DATA so the new page is visible in the editor/tree
   }
 
   async function createProject() {
@@ -1060,7 +1230,7 @@ export function App() {
     setPages((current) => mergePages(current, data.pages));
     if (startPage) {
       setSelectedId(startPage.id);
-      setMemoryViewOpen(false);
+      backToData(); // land in DATA so the new project page is visible
     }
     setProjectName("");
     setProjectFormOpen(false);
@@ -1195,7 +1365,7 @@ export function App() {
     const data = (await response.json()) as { page: Page };
     setPages((current) => orderPages([data.page, ...current]));
     setSelectedId(data.page.id);
-    setMemoryViewOpen(false);
+    backToData(); // land in DATA so the new page is visible in the editor/tree
   }
 
   async function movePage(page: Page, parentPage: Page | null) {
@@ -1312,19 +1482,45 @@ export function App() {
           )}
         </div>
 
-        <button className="primaryButton" type="button" onClick={openMemoryView}>
-          <Icon name="spark" size={14} />
-          Memory
-        </button>
-        <button className="primaryButton" type="button" onClick={openTeamView}>
-          <Icon name="spark" size={14} />
-          Team
-        </button>
-        <button className="primaryButton" type="button" onClick={openTasksView}>
-          <Icon name="spark" size={14} />
-          Tasks
-        </button>
+        <nav className="sectionNav" aria-label="Sections">
+          <button
+            className={!teamViewOpen && !tasksViewOpen ? "sectionNavButton active" : "sectionNavButton"}
+            type="button"
+            onClick={backToData}
+          >
+            <Icon name="doc" size={14} />
+            Data
+          </button>
+          <button
+            className={teamViewOpen ? "sectionNavButton active" : "sectionNavButton"}
+            type="button"
+            onClick={openTeamView}
+          >
+            <Icon name="spark" size={14} />
+            Team
+          </button>
+          <button
+            className={tasksViewOpen ? "sectionNavButton active" : "sectionNavButton"}
+            type="button"
+            onClick={openTasksView}
+          >
+            <Icon name="spark" size={14} />
+            Tasks
+          </button>
+        </nav>
 
+        {!teamViewOpen && !tasksViewOpen && (
+          <button
+            className={memoryViewOpen ? "primaryButton active" : "primaryButton"}
+            type="button"
+            onClick={memoryViewOpen ? backToData : openMemoryView}
+          >
+            <Icon name="spark" size={14} />
+            {memoryViewOpen ? "Back to pages" : "Memory"}
+          </button>
+        )}
+
+        {!teamViewOpen && !tasksViewOpen && (
         <nav className="pageList" aria-label="Pages">
           <div
             className={[
@@ -1456,6 +1652,19 @@ export function App() {
             </div>
           ))}
         </nav>
+        )}
+
+        <button
+          className="sidebarSetupButton"
+          type="button"
+          onClick={() => {
+            setOnbStep(0);
+            setOnbError(null);
+            setOnboardingOpen(true);
+          }}
+        >
+          Setup
+        </button>
       </aside>
 
       <section className="workspace">
@@ -1490,7 +1699,7 @@ export function App() {
                         className={agent.slug === selectedAgentSlug ? "memoryItem active" : "memoryItem"}
                         key={agent.id}
                         type="button"
-                        onClick={() => setSelectedAgentSlug(agent.slug)}
+                        onClick={() => selectAgent(agent.slug)}
                       >
                         <span>{agent.name}</span>
                         <small>
@@ -1501,32 +1710,11 @@ export function App() {
                       </button>
                     ))
                   ) : (
-                    <p>No agents yet. Add an agents/&lt;slug&gt;.md persona file.</p>
+                    <p className="laneEmpty">
+                      No agents yet — use <strong>Setup</strong> to create your first one.
+                    </p>
                   )}
                 </div>
-                {selectedAgentSlug && (
-                  <div className="memoryDetail">
-                    <div className="memoryDetailHeader">
-                      <div>
-                        <strong>{selectedAgentSlug}</strong>
-                        <small>run a prompt against this agent</small>
-                      </div>
-                    </div>
-                    <textarea
-                      className="entityEditor"
-                      value={agentPrompt}
-                      rows={6}
-                      placeholder="Prompt for the agent…"
-                      onChange={(event) => setAgentPrompt(event.target.value)}
-                    />
-                    <button type="button" onClick={runSelectedAgent} disabled={agentRunning || !agentPrompt.trim()}>
-                      {agentRunning ? "Running…" : "Run agent"}
-                    </button>
-                    {agentRunError && <p className="runError">{agentRunError}</p>}
-                  </div>
-                )}
-              </aside>
-              <aside className="memoryPanel">
                 <div className="panelHeader">
                   <h2>Providers</h2>
                 </div>
@@ -1541,6 +1729,83 @@ export function App() {
                   ))}
                 </div>
               </aside>
+              {selectedAgentSlug && (
+                <aside className="memoryPanel">
+                  <div className="memoryDetail">
+                    <div className="memoryDetailHeader">
+                      <div>
+                        <strong>{selectedAgentSlug}</strong>
+                        <small>persona · jobs · run history</small>
+                      </div>
+                    </div>
+
+                    <h3>Persona</h3>
+                    <textarea
+                      className="entityEditor"
+                      value={agentPersona}
+                      rows={8}
+                      placeholder="System prompt (persona) for this agent…"
+                      onChange={(event) => {
+                        setAgentPersona(event.target.value);
+                        setAgentPersonaSaveState("dirty");
+                      }}
+                    />
+                    <button type="button" onClick={saveAgentPersona} disabled={agentPersonaSaveState !== "dirty"}>
+                      {agentPersonaSaveState === "saving" ? "Saving…" : "Save persona"}
+                    </button>
+
+                    <h3>Run a prompt</h3>
+                    <textarea
+                      className="entityEditor"
+                      value={agentPrompt}
+                      rows={4}
+                      placeholder="Prompt for the agent…"
+                      onChange={(event) => setAgentPrompt(event.target.value)}
+                    />
+                    <button type="button" onClick={runSelectedAgent} disabled={agentRunning || !agentPrompt.trim()}>
+                      {agentRunning ? "Running…" : "Run agent"}
+                    </button>
+                    {agentRunError && <p className="runError">{agentRunError}</p>}
+
+                    <h3>Jobs</h3>
+                    {teamJobs.filter((j) => j.agent === selectedAgentSlug).length ? (
+                      teamJobs
+                        .filter((j) => j.agent === selectedAgentSlug)
+                        .map((job) => (
+                          <div className="sourceItem" key={job.id}>
+                            <span>{job.name}</span>
+                            <small>
+                              {job.schedule}
+                              {job.enabled ? "" : " · disabled"}
+                            </small>
+                          </div>
+                        ))
+                    ) : (
+                      <p className="laneEmpty">No jobs target this agent.</p>
+                    )}
+
+                    <h3>Run history</h3>
+                    {agentRuns.length ? (
+                      agentRuns.map((run) => (
+                        <button
+                          className="memoryItem"
+                          key={run.id}
+                          type="button"
+                          onClick={async () => {
+                            await openTasksView();
+                            await openConversation(run.id);
+                          }}
+                        >
+                          <span>{run.status}</span>
+                          <small>{run.startedAt ?? ""}</small>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="laneEmpty">No runs yet.</p>
+                    )}
+                  </div>
+                </aside>
+              )}
             </div>
           </div>
         ) : tasksViewOpen ? (
@@ -1556,41 +1821,51 @@ export function App() {
                 <Icon name="doc" size={15} />
               </button>
             </header>
-            <div className="memoryGrid">
-              <aside className="memoryPanel">
-                <div className="panelHeader">
-                  <h2>Lanes</h2>
-                  <button type="button" onClick={loadConversations}>
-                    Refresh
-                  </button>
-                </div>
-                {TASK_LANES.map((lane) => {
-                  const laneConversations = conversations.filter((c) => c.status === lane.key);
-                  if (laneConversations.length === 0) return null;
-                  return (
-                    <div className="memoryList" key={lane.key}>
-                      <h3>
-                        {lane.label} ({laneConversations.length})
-                      </h3>
-                      {laneConversations.map((conv) => (
-                        <button
-                          className={conv.id === selectedConversation?.id ? "memoryItem active" : "memoryItem"}
-                          key={conv.id}
-                          type="button"
-                          onClick={() => openConversation(conv.id)}
-                        >
-                          <span>{conv.agent}</span>
-                          <small>
-                            {conv.provider ?? "none"}
-                            {conv.job ? ` · job:${conv.job}` : ""}
-                          </small>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })}
-                {conversations.length === 0 && <p>No conversations yet. Run an agent from Team.</p>}
-              </aside>
+            {boardError && <p className="runError">{boardError}</p>}
+            <div className="taskBoardGrid">
+              <div className="taskBoard" role="list">
+                {conversations.length === 0 ? (
+                  <p className="laneEmpty">No conversations yet. Run an agent from Team.</p>
+                ) : (
+                  <div className="laneContainer">
+                    {TASK_LANES.map((lane) => {
+                      const laneConversations = conversations.filter((c) => c.status === lane.key);
+                      return (
+                        <div className="lane" key={lane.key}>
+                          <h3 className="laneHeader">
+                            {lane.label} <span className="laneCount">{laneConversations.length}</span>
+                          </h3>
+                          {laneConversations.map((conv) => (
+                            <div
+                              className={conv.id === selectedConversation?.id ? "laneCard active" : "laneCard"}
+                              key={conv.id}
+                            >
+                              <button className="laneCardOpen" type="button" onClick={() => openConversation(conv.id)}>
+                                <strong>{conv.agent}</strong>
+                                <small>
+                                  {conv.provider ?? "none"}
+                                  {conv.job ? ` · ${conv.job}` : ""}
+                                </small>
+                              </button>
+                              <div className="laneCardActions">
+                                <button type="button" onClick={() => rerunConversation(conv)}>
+                                  Re-run
+                                </button>
+                                {conv.status !== "archived" && (
+                                  <button type="button" onClick={() => archiveConversationUi(conv.id)}>
+                                    Archive
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                          {laneConversations.length === 0 && <p className="laneEmpty">—</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               {selectedConversation && (
                 <aside className="memoryPanel">
                   <div className="memoryDetail">
@@ -1601,6 +1876,9 @@ export function App() {
                         </strong>
                         <small>{selectedConversation.startedAt ?? ""}</small>
                       </div>
+                      <button type="button" onClick={() => setSelectedConversation(null)}>
+                        Close
+                      </button>
                     </div>
                     {selectedConversation.error && <p>Error: {selectedConversation.error}</p>}
                     {selectedConversation.turns.map((turn, index) => (
@@ -2280,6 +2558,80 @@ export function App() {
           </>
         )}
       </section>
+
+      {onboardingOpen && (
+        <div className="onboardingOverlay" role="dialog" aria-modal="true">
+          <div className="onboardingCard">
+            <div className="onboardingHeader">
+              <strong>Welcome to Company Brain</strong>
+              <button type="button" onClick={dismissOnboarding} title="Skip setup">
+                Skip
+              </button>
+            </div>
+
+            {onbStep === 0 && (
+              <div className="onboardingStep">
+                <h3>1 · Agent providers</h3>
+                <p>Company Brain runs agents through the agent CLIs installed on this host.</p>
+                <div className="memoryList">
+                  {providers.map((p) => (
+                    <div className="sourceItem" key={p.id}>
+                      <span>
+                        {p.id} {p.detection.available ? "✓ available" : "✗ not found"}
+                      </span>
+                      <small>{p.detection.available ? p.detection.version ?? p.detection.path : p.detection.error}</small>
+                    </div>
+                  ))}
+                  {providers.length === 0 && <p className="laneEmpty">No providers detected.</p>}
+                </div>
+                <button type="button" onClick={() => setOnbStep(1)}>
+                  Next
+                </button>
+              </div>
+            )}
+
+            {onbStep === 1 && (
+              <div className="onboardingStep">
+                <h3>2 · Create your first agent</h3>
+                <label>
+                  Name
+                  <input value={onbName} onChange={(event) => setOnbName(event.target.value)} placeholder="Scribe" />
+                </label>
+                <label>
+                  Provider
+                  <select value={onbProvider} onChange={(event) => setOnbProvider(event.target.value)}>
+                    <option value="">(none)</option>
+                    {providers.map((p) => (
+                      <option key={p.id} value={p.id} disabled={!p.detection.available}>
+                        {p.id}
+                        {p.detection.available ? "" : " (not found)"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Persona (system prompt)
+                  <textarea
+                    className="entityEditor"
+                    rows={5}
+                    value={onbPersona}
+                    onChange={(event) => setOnbPersona(event.target.value)}
+                  />
+                </label>
+                {onbError && <p className="runError">{onbError}</p>}
+                <div className="onboardingActions">
+                  <button type="button" onClick={() => setOnbStep(0)}>
+                    Back
+                  </button>
+                  <button type="button" onClick={createFirstAgent} disabled={onbBusy || !onbName.trim()}>
+                    {onbBusy ? "Creating…" : "Create agent"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }

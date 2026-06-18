@@ -1362,3 +1362,182 @@ textarea {
     border-bottom: 1px solid var(--color-border);
   }
 }
+
+/* Phase 4: DATA/TEAM/TASKS section nav */
+.sectionNav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.sectionNavButton {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-default);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.sectionNavButton:hover {
+  background: var(--color-selected);
+}
+.sectionNavButton.active {
+  color: var(--color-strong);
+  background: var(--color-selected);
+  border-color: var(--color-subtle);
+}
+.primaryButton.active {
+  color: var(--color-strong);
+  background: var(--color-selected);
+}
+
+/* Phase 4: TASKS board */
+.taskBoardGrid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+.taskBoard {
+  overflow: auto;
+}
+.laneContainer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.lane {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.laneHeader {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+.laneCount {
+  color: var(--color-default);
+}
+.laneEmpty {
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+.laneCard {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.laneCard.active {
+  border-color: var(--color-subtle);
+  background: var(--color-selected);
+}
+.laneCardOpen {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.laneCardOpen small {
+  color: var(--color-subtle);
+}
+.laneCardActions {
+  display: flex;
+  gap: 6px;
+}
+.laneCardActions button {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  cursor: pointer;
+}
+.laneCardActions button:hover {
+  background: var(--color-selected);
+}
+
+/* Phase 4: onboarding wizard */
+.onboardingOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.onboardingCard {
+  width: min(520px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.onboardingHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.onboardingStep {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.onboardingStep label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-default);
+}
+.onboardingActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.sidebarSetupButton {
+  margin-top: auto;
+  font-size: 12px;
+  color: var(--color-subtle);
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 6px 2px;
+  cursor: pointer;
+}
+.sidebarSetupButton:hover {
+  color: var(--color-default);
+}
+
+/* Phase 4: collapse the TASKS board on narrow widths. Placed after the base
+   .taskBoardGrid rule so it isn't shadowed by source order at equal specificity. */
+@media (max-width: 860px) {
+  .taskBoardGrid {
+    grid-template-columns: 1fr;
+  }
+}

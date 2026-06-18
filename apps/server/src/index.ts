@@ -186,9 +186,33 @@ app.get("/api/agents/:slug/file", async (c) => {
 // itself execute anything. Host execution only happens via the opt-in scheduler
 // or the opt-in run API. Authn/RBAC for all writes is Phase 5.
 app.put("/api/agents/:slug/file", async (c) => {
-  const body = z.object({ markdown: z.string(), actor: z.string().min(1).optional() }).parse(await c.req.json());
-  const agent = await agents.saveAgentFile(c.req.param("slug"), body.markdown, body.actor);
-  return c.json({ agent });
+  const body = z
+    .object({
+      markdown: z.string(),
+      actor: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
+      provider: z.string().optional(),
+      model: z.string().optional(),
+      enabled: z.boolean().optional(),
+      exclusive: z.boolean().optional()
+    })
+    .parse(await c.req.json());
+  try {
+    const agent = await agents.saveAgentFile(
+      c.req.param("slug"),
+      body.markdown,
+      body.actor,
+      { name: body.name, provider: body.provider, model: body.model, enabled: body.enabled },
+      { exclusive: body.exclusive }
+    );
+    return c.json({ agent });
+  } catch (err) {
+    // Exclusive-create against an existing canonical file → 409 (not a 500).
+    if (body.exclusive && err instanceof Error && /already exists/.test(err.message)) {
+      return c.json({ error: err.message }, 409);
+    }
+    throw err;
+  }
 });
 
 // HTTP-triggered runs spawn the agent's configured provider (local CLI = host
@@ -252,6 +276,13 @@ app.get("/api/conversations", async (c) => {
 
 app.get("/api/conversations/:id", async (c) => {
   const conversation = await agents.getConversation(c.req.param("id"));
+  if (!conversation) return c.json({ error: "Conversation not found" }, 404);
+  return c.json({ conversation });
+});
+
+app.post("/api/conversations/:id/archive", async (c) => {
+  const body = pageActionInput.parse(await c.req.json().catch(() => ({})));
+  const conversation = await agents.archiveConversation(c.req.param("id"), body.actor);
   if (!conversation) return c.json({ error: "Conversation not found" }, 404);
   return c.json({ conversation });
 });

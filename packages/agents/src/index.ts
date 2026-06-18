@@ -376,17 +376,39 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
     },
 
     /** Save a raw human edit of an agent file through the single writer -> reindex. */
-    async saveAgentFile(slug: string, markdown: string, actor = "local-user"): Promise<Agent | null> {
+    async saveAgentFile(
+      slug: string,
+      markdown: string,
+      actor = "local-user",
+      patch?: { name?: string; provider?: string; model?: string; enabled?: boolean },
+      opts?: { exclusive?: boolean }
+    ): Promise<Agent | null> {
       if (!fileMode) throw new Error("Editing agent files requires file mode (gitWriter + workspace).");
       const ws = workspace!;
       await gitWriter!.enqueue({
         paths: [ws.agentFilePath(slug)],
-        message: `agent: edit ${slug}`,
+        message: `agent: ${opts?.exclusive ? "create" : "edit"} ${slug}`,
         actor: { name: actor },
         write: async () => {
           const cur = await ws.readAgent(slug);
-          const frontmatter = cur?.frontmatter ?? { id: undefined, title: slug };
-          await ws.writeAgent(slug, { frontmatter, markdown }, new Date().toISOString());
+          // Exclusive create: refuse if the canonical workspace file already exists.
+          // Checked here (inside the serialized writer) against files — not the derived
+          // index — so a stale/empty index can't let setup clobber an existing persona.
+          if (opts?.exclusive && cur) {
+            throw new Error(`Agent "${slug}" already exists`);
+          }
+          // Preserve existing frontmatter identity/config; apply the patch (lets the
+          // UI set provider/model/name/enabled, not just the system-prompt body).
+          // NOTE: for a new agent `id` is absent here, but writeFileIn's ensureId
+          // generates + persists a stable id before writing (and readFileIn backfills
+          // on read), so the file's id is stable across reindex — no churn.
+          const base: Partial<PageFrontmatter> = cur?.frontmatter ?? { title: slug };
+          const frontmatter: Partial<PageFrontmatter> = { ...base };
+          if (patch?.name !== undefined) frontmatter.title = patch.name;
+          if (patch?.provider !== undefined) frontmatter.provider = patch.provider;
+          if (patch?.model !== undefined) frontmatter.model = patch.model;
+          if (patch?.enabled !== undefined) frontmatter.enabled = patch.enabled;
+          await ws.writeAgent(slug, { frontmatter, markdown }, new Date().toISOString(), { exclusive: opts?.exclusive });
         },
       });
       return this.getAgent(slug);
@@ -442,6 +464,53 @@ export async function createAgentStore(db?: CompanyBrainDb, opts?: AgentStoreOpt
         if (stored) turns = parseConversation(stored).turns;
       }
       return { ...toConversation(row), turns };
+    },
+
+    /**
+     * Archive a conversation: a single status→archived lifecycle edit to its
+     * transcript file, through the single writer → reindex. The only
+     * post-completion edit to a transcript (otherwise write-once). Idempotent;
+     * null if the conversation file is missing.
+     */
+    async archiveConversation(id: string, actor = "system"): Promise<Conversation | null> {
+      if (!fileMode) throw new Error("Archiving conversations requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      const stored = await ws.readConversation(id);
+      if (!stored) return null;
+      const doc = parseConversation(stored);
+      if (doc.status !== "archived") {
+        await gitWriter!.enqueue({
+          paths: [ws.conversationFilePath(id)],
+          message: `conversation: archive ${id}`,
+          actor: { name: actor },
+          write: async () => {
+            const cur = await ws.readConversation(id);
+            if (!cur) return;
+            const fresh = buildConversationFile({ ...parseConversation(cur), status: "archived" });
+            await ws.writeConversation(id, { frontmatter: fresh.frontmatter, markdown: fresh.markdown }, new Date().toISOString());
+          },
+        });
+      }
+      // Reconcile the derived row from the canonical file. Repairs a stale index
+      // if a prior archive's reindex hook failed (file archived, row still done/failed)
+      // — a retry now fixes it. Idempotent when the row already matches (hash skip).
+      await reindexConversations(agentDb, workspace!, [id]);
+      const result = await agentDb.query<ConversationRow>("select * from conversations where id = $1", [id]);
+      if (result.rows[0]) return toConversation(result.rows[0]);
+      // The file exists (read above) but the derived row is missing/stale — derive
+      // the result from the file so callers don't see a spurious 404.
+      return {
+        id: doc.id || id,
+        agent: doc.agent,
+        job: doc.job ?? null,
+        status: "archived",
+        provider: doc.provider ?? null,
+        model: doc.model ?? null,
+        startedAt: doc.startedAt || null,
+        endedAt: doc.endedAt ?? null,
+        usage: doc.usage ?? null,
+        error: doc.error ?? null,
+      };
     },
 
     /** Write a conversation transcript once (the finalized run) through the writer. */

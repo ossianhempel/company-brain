@@ -92,3 +92,32 @@ test("saveConversation writes a transcript once and getConversation returns its 
     assert.equal(other.length, 0);
   });
 });
+
+test("saveAgentFile gives a new agent a stable id (no churn on re-save)", async () => {
+  await withStore(async (store) => {
+    await store.saveAgentFile("scribe", "v1");
+    const first = await store.getAgent("scribe");
+    assert.ok(first?.id);
+    await store.saveAgentFile("scribe", "v2"); // edit
+    const second = await store.getAgent("scribe");
+    assert.equal(second?.id, first?.id); // id is stable across saves/reindex
+    const all = await store.listAgents();
+    assert.equal(all.filter((a) => a.slug === "scribe").length, 1); // no duplicate row
+  });
+});
+
+test("saveAgentFile exclusive create refuses to overwrite an existing canonical file", async () => {
+  await withStore(async (store) => {
+    await store.saveAgentFile("scribe", "v1", "web", undefined, { exclusive: true });
+    const first = await store.getAgent("scribe");
+    assert.ok(first?.id);
+    // a second exclusive create must reject (checked against the file, not the index)
+    await assert.rejects(
+      () => store.saveAgentFile("scribe", "v2", "web", undefined, { exclusive: true }),
+      /already exists/i
+    );
+    // a non-exclusive edit still works
+    const edited = await store.saveAgentFile("scribe", "v3", "web");
+    assert.ok(edited);
+  });
+});

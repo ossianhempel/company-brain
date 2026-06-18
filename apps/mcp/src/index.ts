@@ -791,6 +791,24 @@ server.registerTool(
 );
 
 server.registerTool(
+  "company_brain_archive_conversation",
+  {
+    title: "Archive Conversation",
+    description: "Archive a conversation (status → archived) so it leaves the active task lanes.",
+    inputSchema: { id: z.string().min(1).describe("Conversation id.") },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+  },
+  async ({ id }) => {
+    return toolResult(
+      await requestApi<{ conversation: unknown }>(`/api/conversations/${encodeURIComponent(id)}/archive`, {
+        method: "POST",
+        body: JSON.stringify({ actor: "mcp" })
+      })
+    );
+  }
+);
+
+server.registerTool(
   "company_brain_list_providers",
   {
     title: "List Providers",

@@ -130,6 +130,36 @@ if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingCon
 const memory = await createMemoryStore(db, { gitWriter, workspace, embeddings });
 // Optional pgvector groundwork (Postgres-only, autocommit, outside any migration).
 await setupPgVector(db, { isPostgres: Boolean(process.env.COMPANY_BRAIN_DATABASE_URL ?? process.env.DATABASE_URL) });
+// Keep hybrid-recall embeddings fresh after content writes (only when a provider is
+// configured). Runs AFTER the commit via setImmediate — best-effort + overlap-guarded —
+// so the network embed call never blocks the serialized writer; content-hash skip makes
+// it idempotent. (Source artifacts are DB-only; they embed on the next content commit or
+// an admin reindex.)
+if (embeddingConfig) {
+  let embedRunning = false;
+  let embedQueued = false;
+  const refreshEmbeddings = (): void => {
+    if (embedRunning) {
+      embedQueued = true;
+      return;
+    }
+    embedRunning = true;
+    setImmediate(() => {
+      void reindexEmbeddings(db, embeddings)
+        .catch((err) => console.error("[embeddings] refresh failed:", err instanceof Error ? err.message : err))
+        .finally(() => {
+          embedRunning = false;
+          if (embedQueued) {
+            embedQueued = false;
+            refreshEmbeddings();
+          }
+        });
+    });
+  };
+  gitWriter.addCommitHook(({ paths }) => {
+    if (paths.some((p) => workspace.pathArea(p) === "pages" || workspace.pathArea(p) === "memory")) refreshEmbeddings();
+  });
+}
 gitWriter.addCommitHook(suggestionsCommitHook(db, workspace));
 const suggestions = await createSuggestionStore(db, { gitWriter, workspace, pages });
 
@@ -492,11 +522,16 @@ app.post("/api/conversations/:id/archive", async (c) => {
   return c.json({ conversation });
 });
 
-// Memory extraction from a finished conversation. Admin-gated (ADMIN_PATTERNS) +
-// off by default; attributes extracted memories to the authenticated principal.
+// Memory extraction from a finished conversation. Host execution → gated like the run
+// API: off by default + admin (ADMIN_PATTERNS) when auth is on, and — because auth is off
+// by default, where every request is the local admin — the same run-token second factor
+// applies in auth-off mode (set COMPANY_BRAIN_AGENT_RUN_TOKEN to require it).
 app.post("/api/conversations/:id/extract", async (c) => {
   if (!memoryExtractionEnabled) {
     return c.json({ error: "Memory extraction is disabled. Set COMPANY_BRAIN_ENABLE_MEMORY_EXTRACTION=1 to enable." }, 403);
+  }
+  if (!serverAuth.enabled && agentRunToken && c.req.header("authorization") !== `Bearer ${agentRunToken}`) {
+    return c.json({ error: "Unauthorized" }, 401);
   }
   const result = await extractFromConversation(c.req.param("id"), extractionDeps, {
     enabled: true,

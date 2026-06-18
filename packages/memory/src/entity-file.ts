@@ -29,6 +29,9 @@ export interface EntityFact {
   citations: string[]; // slugs extracted from [[...]]
   confidence: number;
   status: MemoryStatus;
+  /** When status is `superseded`, the id of the fact that replaced it (round-trips
+   *  to memories.superseded_by_memory_id so the link is rebuildable from the file). */
+  supersededBy?: string;
   /**
    * Full structured citations (artifact/manual/chunk/page incl. quotes),
    * round-tripped via the fact's machine comment so file-mode saveMemory keeps
@@ -47,7 +50,7 @@ export interface EntityDoc {
   facts: EntityFact[];
 }
 
-const FACT_META = /<!--\s*id:(\S+)\s+conf:([\d.]+)\s+status:(\w+)(?:\s+src:(\S+))?\s*-->\s*$/;
+const FACT_META = /<!--\s*id:(\S+)\s+conf:([\d.]+)\s+status:(\w+)(?:\s+sup:(\S+))?(?:\s+src:(\S+))?\s*-->\s*$/;
 const CITATION = /\[\[([^\]]+)\]\]/g;
 const DEFAULT_TYPE: EntityType = "topic";
 
@@ -127,6 +130,7 @@ function parseFactLine(line: string, entityId: string): EntityFact | null {
   let markerId: string | null = null;
   let confidence = 1;
   let status: MemoryStatus = "active";
+  let supersededBy: string | undefined;
   let visible = item;
   const meta = item.match(FACT_META);
   if (meta) {
@@ -134,6 +138,7 @@ function parseFactLine(line: string, entityId: string): EntityFact | null {
     const conf = Number(meta[2]);
     confidence = Number.isFinite(conf) ? conf : 1; // allow 0 (don't coerce via ||)
     status = (meta[3] as MemoryStatus) || "active";
+    supersededBy = meta[4] || undefined;
     visible = item.slice(0, meta.index).trim();
   }
   const parts = visible.split(" · ");
@@ -143,16 +148,17 @@ function parseFactLine(line: string, entityId: string): EntityFact | null {
   const content = parts.slice(2).join(" · ").trim();
   // Marker id wins; otherwise derive a stable, entity-namespaced id.
   const id = markerId ?? deterministicFactId(entityId, date, kind, content);
-  const sources = meta && meta[4] ? decodeSources(meta[4]) : [];
-  return { id, date, kind, content, citations: extractCitations(content), confidence, status, sources };
+  const sources = meta && meta[5] ? decodeSources(meta[5]) : [];
+  return { id, date, kind, content, citations: extractCitations(content), confidence, status, supersededBy, sources };
 }
 
 function serializeFact(fact: EntityFact): string {
   // A timeline fact is a single list item; collapse newlines so multi-line
   // content can't split the item across lines (which the parser reads line-wise).
   const content = fact.content.replace(/\s*\n\s*/g, " ").trim();
+  const sup = fact.supersededBy ? ` sup:${fact.supersededBy}` : "";
   const src = fact.sources.length ? ` src:${encodeSources(fact.sources)}` : "";
-  return `- ${fact.date} · **${fact.kind}** · ${content} <!--id:${fact.id} conf:${fact.confidence} status:${fact.status}${src}-->`;
+  return `- ${fact.date} · **${fact.kind}** · ${content} <!--id:${fact.id} conf:${fact.confidence} status:${fact.status}${sup}${src}-->`;
 }
 
 /** Parse an entity file (frontmatter + body) into a structured doc. */
@@ -194,10 +200,11 @@ export function appendFact(doc: EntityDoc, fact: EntityFact): EntityDoc {
   return { ...doc, facts: [...doc.facts, fact] };
 }
 
-/** Set a fact's status (e.g. forget/supersede); returns a new doc. */
-export function setFactStatus(doc: EntityDoc, factId: string, status: MemoryStatus): EntityDoc {
+/** Set a fact's status (e.g. forget/supersede); returns a new doc. When superseding,
+ *  pass the replacing fact id so the link round-trips to the derived index. */
+export function setFactStatus(doc: EntityDoc, factId: string, status: MemoryStatus, supersededBy?: string): EntityDoc {
   return {
     ...doc,
-    facts: doc.facts.map((f) => (f.id === factId ? { ...f, status } : f)),
+    facts: doc.facts.map((f) => (f.id === factId ? { ...f, status, supersededBy: supersededBy ?? f.supersededBy } : f)),
   };
 }

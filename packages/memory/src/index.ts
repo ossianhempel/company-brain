@@ -9,6 +9,7 @@ import {
   appendFact,
   setFactStatus,
   type EntityDoc,
+  type FactSource,
 } from "./entity-file.ts";
 import { type EmbeddingRegistry } from "./embedding.ts";
 import { loadEmbeddings } from "./embedding-store.ts";
@@ -307,6 +308,11 @@ function chunkText(text: string, maxWords = 180) {
   return chunks;
 }
 
+/** Normalize fact content for dedup matching — case + whitespace insensitive. */
+function normalizeContent(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 function normalizeQuery(value: string) {
   return value
     .toLowerCase()
@@ -489,6 +495,9 @@ export async function reindexEntities(
     // Re-atomize the entity's facts into the derived memories index.
     await db.query("delete from memories where entity_id = $1", [doc.id]);
     for (const fact of doc.facts) {
+      // Insert with a null superseded_by first; the link is set in a second pass
+      // below, after all facts exist (the replacement fact may be inserted later in
+      // this same loop, so an inline FK reference could point at a not-yet-inserted row).
       await db.query(
         `
           insert into memories (id, kind, content, subject, status, confidence, created_by, entity_id)
@@ -527,6 +536,14 @@ export async function reindexEntities(
           `,
           [randomUUID(), fact.id, pageId]
         );
+      }
+    }
+
+    // Second pass: set superseded_by links now that every fact row exists (the
+    // replacement may have been inserted after the superseded fact in the loop above).
+    for (const fact of doc.facts) {
+      if (fact.supersededBy) {
+        await db.query("update memories set superseded_by_memory_id = $2 where id = $1", [fact.id, fact.supersededBy]);
       }
     }
 
@@ -895,6 +912,59 @@ export async function createMemoryStore(db?: CompanyBrainDb, opts?: MemoryStoreO
       );
       const row = result.rows[0];
       return row ? { ...toMemory(row), sources: await sourcesForMemory(row.id) } : null;
+    },
+
+    /** Supersede an existing memory: mark it `superseded` (linked to the replacement)
+     *  and append the new fact in ONE queued entity-file mutation. Rebuildable: the
+     *  link round-trips via the fact `sup:` marker → memories.superseded_by_memory_id. */
+    async supersedeMemory(
+      oldId: string,
+      input: { kind: MemoryKind; content: string; confidence?: number; sources?: FactSource[] },
+      actor = "local-user"
+    ): Promise<MemoryWithSources | null> {
+      if (!fileMode) throw new Error("supersedeMemory requires file mode (gitWriter + workspace).");
+      const ws = workspace!;
+      const owner = await memoryDb.query<{ entity_id: string | null }>("select entity_id from memories where id = $1", [oldId]);
+      const entityId = owner.rows[0]?.entity_id;
+      if (!entityId) return null;
+      const ent = await memoryDb.query<{ slug: string }>("select slug from entities where id = $1", [entityId]);
+      const slug = ent.rows[0]?.slug;
+      if (!slug) return null;
+      const fact = newFact({
+        kind: input.kind,
+        content: input.content,
+        date: new Date().toISOString().slice(0, 10),
+        confidence: input.confidence,
+        sources: input.sources,
+      });
+      await gitWriter!.enqueue({
+        paths: [ws.entityFilePath(slug)],
+        message: `memory: supersede ${oldId} -> ${fact.id}`,
+        actor: { name: actor },
+        write: async () => {
+          const cur = await ws.readEntity(slug);
+          if (!cur) return;
+          let doc = parseEntity(cur);
+          doc = setFactStatus(doc, oldId, "superseded", fact.id);
+          doc = appendFact(doc, fact);
+          const file = buildEntityFile(doc);
+          await ws.writeEntity(slug, { frontmatter: file.frontmatter, markdown: file.markdown }, new Date().toISOString());
+        },
+      });
+      return loadMemory(fact.id);
+    },
+
+    /** Find an active fact in an entity by (kind, normalized content) — the dedup
+     *  probe extraction uses to choose save-new vs supersede vs skip. */
+    async findExistingFact(entitySlug: string, kind: MemoryKind, content: string): Promise<MemoryWithSources | null> {
+      if (!fileMode) return null;
+      const cur = await workspace!.readEntity(entitySlug);
+      if (!cur) return null;
+      const norm = normalizeContent(content);
+      const match = parseEntity(cur).facts.find(
+        (f) => f.status === "active" && f.kind === kind && normalizeContent(f.content) === norm
+      );
+      return match ? loadMemory(match.id) : null;
     },
 
     async getMemory(id: string): Promise<MemoryWithSources | null> {

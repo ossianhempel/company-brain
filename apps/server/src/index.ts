@@ -100,7 +100,9 @@ const memoryInput = z.object({
 const recallInput = z.object({
   q: z.string().min(1),
   limit: z.coerce.number().int().min(1).max(50).optional(),
-  mode: z.enum(["bm25_local_v1", "lexical_v1"]).optional()
+  mode: z.enum(["bm25_local_v1", "lexical_v1", "hybrid_rrf_v1"]).optional(),
+  kind: z.string().min(1).optional(),
+  subject: z.string().min(1).optional()
 });
 const memoryListInput = z.object({
   status: z.enum(["active", "superseded", "forgotten"]).optional(),
@@ -459,8 +461,15 @@ app.post("/api/projects", async (c) => {
 });
 
 app.get("/api/recall", async (c) => {
-  const input = recallInput.parse({ q: c.req.query("q"), limit: c.req.query("limit"), mode: c.req.query("mode") });
-  return c.json(await memory.recall(input.q, input.limit, input.mode));
+  const input = recallInput.parse({
+    q: c.req.query("q"),
+    limit: c.req.query("limit"),
+    mode: c.req.query("mode"),
+    kind: c.req.query("kind"),
+    subject: c.req.query("subject")
+  });
+  const filters = input.kind || input.subject ? { kind: input.kind, subject: input.subject } : undefined;
+  return c.json(await memory.recall(input.q, input.limit, input.mode, filters));
 });
 
 app.post("/api/source-artifacts", async (c) => {

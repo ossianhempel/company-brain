@@ -341,8 +341,8 @@ function recallModeFromFlags(flags: Flags): RecallSearchMode | undefined {
   if (!mode) {
     return undefined;
   }
-  if (mode !== "bm25_local_v1" && mode !== "lexical_v1") {
-    throw new Error("memory recall --mode must be bm25_local_v1 or lexical_v1");
+  if (mode !== "bm25_local_v1" && mode !== "lexical_v1" && mode !== "hybrid_rrf_v1") {
+    throw new Error("memory recall --mode must be bm25_local_v1, lexical_v1, or hybrid_rrf_v1");
   }
   return mode;
 }

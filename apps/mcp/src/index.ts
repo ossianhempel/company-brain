@@ -54,7 +54,7 @@ type PageVersion = {
 
 type RecallResponse = {
   query: string;
-  searchMode: "bm25_local_v1" | "lexical_v1";
+  searchMode: "bm25_local_v1" | "lexical_v1" | "hybrid_rrf_v1";
   results: Array<{
     type: "memory" | "page_chunk" | "source_chunk";
     id: string;
@@ -282,9 +282,9 @@ server.registerTool(
       query: z.string().min(1).describe("Recall query."),
       limit: z.number().int().min(1).max(50).default(10).describe("Maximum results to return."),
       mode: z
-        .enum(["bm25_local_v1", "lexical_v1"])
+        .enum(["bm25_local_v1", "lexical_v1", "hybrid_rrf_v1"])
         .default("bm25_local_v1")
-        .describe("Recall mode. bm25_local_v1 is local keyword ranking. lexical_v1 is the older exact term-overlap mode.")
+        .describe("Recall mode. bm25_local_v1 is local keyword ranking. lexical_v1 is the older exact term-overlap mode. hybrid_rrf_v1 fuses BM25 with vector similarity (RRF) when an embedding provider is configured, else degrades to BM25.")
     },
     annotations: {
       readOnlyHint: true,

@@ -667,10 +667,14 @@ async function main() {
       throw new Error(`Page not found: ${ref}`);
     }
 
+    // Participate in per-file optimistic concurrency by default: send the version
+    // we just fetched so a concurrent edit returns 409. --force opts out (last-write-
+    // wins) for automation that intends to overwrite.
     const body = {
       title: flagString(flags, "title"),
       html: await htmlFromFlags(flags),
-      actor: flagString(flags, "actor") ?? "cli"
+      actor: flagString(flags, "actor") ?? "cli",
+      ...(flags.force ? {} : { baseVersion: current.version ?? null })
     };
     const page = useApi
       ? (await requestApi<{ page: Page }>(`/api/pages/${current.id}`, {

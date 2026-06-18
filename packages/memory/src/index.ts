@@ -17,6 +17,16 @@ export {
   apiEmbeddingConfigFromEnv,
   type ApiEmbeddingConfig,
 } from "./providers/api-embedding.ts";
+export {
+  gatherChunks,
+  embedChunks,
+  reindexEmbeddings,
+  loadEmbeddings,
+  setupPgVector,
+  type ChunkType,
+  type EmbeddableChunk,
+  type StoredEmbedding,
+} from "./embedding-store.ts";
 
 /** Options enabling file-canonical memory: writes go to entity files + git. */
 export interface MemoryStoreOptions {

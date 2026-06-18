@@ -7,7 +7,15 @@ import { createGitWriter, WorkspaceConflictError } from "@company-brain/git-writ
 import { createWorkspace, resolveWorkspaceDir } from "@company-brain/workspace";
 import { readCookie, verifySignedValue, roleAtLeast, routeRequirement, SESSION_COOKIE, type Principal } from "@company-brain/auth";
 import { buildAuth } from "./auth.ts";
-import { createMemoryStore, reindexAllEntities } from "@company-brain/memory";
+import {
+  createMemoryStore,
+  reindexAllEntities,
+  createEmbeddingRegistry,
+  createApiEmbeddingProvider,
+  apiEmbeddingConfigFromEnv,
+  reindexEmbeddings,
+  setupPgVector,
+} from "@company-brain/memory";
 import { createPageStore, reindexAllPages } from "@company-brain/pages";
 import { createSuggestionStore, reindexAllSuggestions, suggestionsCommitHook } from "@company-brain/suggestions";
 import {
@@ -108,7 +116,14 @@ const workspaceDir = resolveWorkspaceDir();
 const workspace = createWorkspace({ workspaceDir });
 const gitWriter = createGitWriter({ workspaceDir });
 const pages = await createPageStore(db, { gitWriter, workspace });
-const memory = await createMemoryStore(db, { gitWriter, workspace });
+// Optional embedding provider for hybrid recall — off by default. Configured only
+// when COMPANY_BRAIN_EMBEDDING_* env is set; absent → recall stays BM25-only.
+const embeddings = createEmbeddingRegistry();
+const embeddingConfig = apiEmbeddingConfigFromEnv();
+if (embeddingConfig) embeddings.register(createApiEmbeddingProvider(embeddingConfig));
+const memory = await createMemoryStore(db, { gitWriter, workspace, embeddings });
+// Optional pgvector groundwork (Postgres-only, autocommit, outside any migration).
+await setupPgVector(db, { isPostgres: Boolean(process.env.COMPANY_BRAIN_DATABASE_URL ?? process.env.DATABASE_URL) });
 gitWriter.addCommitHook(suggestionsCommitHook(db, workspace));
 const suggestions = await createSuggestionStore(db, { gitWriter, workspace, pages });
 
@@ -231,7 +246,8 @@ app.post("/api/admin/reindex", async (c) => {
   await reindexAllEntities(db, workspace);
   await reindexAllAgentAreas(db, workspace);
   await reindexAllSuggestions(db, workspace);
-  return c.json({ ok: true });
+  const embedded = await reindexEmbeddings(db, embeddings); // no-op when no provider
+  return c.json({ ok: true, embedded: embedded?.embedded ?? 0 });
 });
 
 // --- Suggest-changes --------------------------------------------------------

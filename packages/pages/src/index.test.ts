@@ -601,3 +601,18 @@ test("getWithRelations surfaces a per-file version token", async () => {
     assert.equal(detail.version, await pages.pageVersion(created.slug));
   });
 });
+
+test("a rename edit with a stale baseVersion still conflicts (no rename bypass)", async () => {
+  await withFilePageStore(async (pages) => {
+    const created = await pages.create({ title: "Original", html: "<h1>Original</h1><p>v1</p>", actor: "a" });
+    const v1 = await pages.pageVersion(created.slug);
+    // another writer edits the same page (no rename) → advances its file version
+    await pages.update(created.id, { html: "<h1>Original</h1><p>v2</p>", actor: "b", baseVersion: v1 });
+    // a stale editor now renames (title change) using the old v1 → must conflict,
+    // not silently clobber the v2 edit by slipping through the rename path
+    await assert.rejects(
+      () => pages.update(created.id, { title: "Renamed", html: "<h1>Renamed</h1><p>stale</p>", actor: "a", baseVersion: v1 }),
+      /Stale write|conflict/i
+    );
+  });
+});

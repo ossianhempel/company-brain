@@ -150,3 +150,15 @@ test("approving a stale suggestion conflicts (target changed since base)", async
     await assert.rejects(() => suggestions.approve(sug!.id, "boss"), /Stale write|conflict/i);
   });
 });
+
+test("approving a suggestion whose target was deleted returns null and leaves it open", async () => {
+  await withStores(async ({ pages, suggestions }) => {
+    const page = await pages.create({ title: "Temp", html: "<h1>Temp</h1><p>x</p>", actor: "owner" });
+    const sug = await suggestions.create({ targetPageId: page.id, proposedMarkdown: "# Temp\n\nproposed\n", title: "T", author: "ada" });
+    await pages.softDelete(page.id, "owner"); // target gone before approval
+    const result = await suggestions.approve(sug!.id, "boss");
+    assert.equal(result, null); // not applied → not approved
+    const open = await suggestions.list({ status: "open" });
+    assert.equal(open.some((s) => s.id === sug!.id), true); // stays open
+  });
+});

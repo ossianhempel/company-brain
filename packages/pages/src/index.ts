@@ -1062,9 +1062,13 @@ export async function createPageStore(db?: CompanyBrainDb, opts?: PageStoreOptio
       paths,
       message: `save ${page.slug}`,
       actor: { name: actor },
-      // Per-file conflict check (skipped on rename — the path legitimately changes).
+      // Per-file conflict check. On a rename the editor's baseVersion is the OLD
+      // file's last-commit oid (the file they loaded), so check the source path —
+      // a stale rename must still conflict, not silently clobber the renamed-from page.
       expectedPathVersion:
-        expectedVersion !== undefined && !renamed ? { path: ws.pageFilePath(page.slug), oid: expectedVersion } : undefined,
+        expectedVersion !== undefined
+          ? { path: renamed ? ws.pageFilePath(renamed) : ws.pageFilePath(page.slug), oid: expectedVersion }
+          : undefined,
       write: async () => {
         await ws.writePage(page.slug, { frontmatter, markdown }, page.updatedAt, { exclusive });
         if (renamed) await ws.deletePage(renamed);

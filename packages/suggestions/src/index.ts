@@ -222,11 +222,14 @@ export async function createSuggestionStore(db: CompanyBrainDb, opts: Suggestion
       }
       const html = workspace.markdownToHtml(doc.proposedMarkdown);
       // Apply via the page store's writer; baseVersion = the proposal's base oid.
-      await pages.update(doc.targetPageId, {
+      const applied = await pages.update(doc.targetPageId, {
         html,
         actor: `${approver} (apply suggestion by ${doc.author})`,
         baseVersion: doc.baseOid,
       });
+      // If the target no longer exists, the edit wasn't applied — don't mark it
+      // approved (that would report applied content that never landed).
+      if (!applied) return null;
       await writeDoc({ ...doc, status: "approved" }, approver, `suggestion: approve ${id}`);
       const row = await db.query<SuggestionRow>("select * from suggestions where id = $1 and deleted_at is null", [id]);
       return row.rows[0] ? toSuggestion(row.rows[0]) : null;
